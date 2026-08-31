@@ -43,7 +43,7 @@ struct SettingsView: View {
                     }) {
                         Text("保存并连接")
                             .frame(maxWidth: .infinity)
-                            .fontWeight(.semibold)
+                            .font(.headline.bold())
                     }
                 }
             }

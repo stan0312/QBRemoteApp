@@ -14,7 +14,7 @@ struct TorrentListView: View {
             Group {
                 if torrents.isEmpty && isLoading {
                     ProgressView("正在加载任务...")
-                } else if torrents.isEmpty && !errorText.isEmpty {
+                } else if torrents.isEmpty && !(errorText?.isEmpty ?? true) {
                     VStack(spacing: 12) {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 40))
@@ -89,8 +89,7 @@ struct TorrentRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(torrent.name)
-                .font(.subheadline)
-                .fontWeight(.medium)
+                .font(.subheadline.weight(.medium))
                 .lineLimit(1)
 
             HStack {

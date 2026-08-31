@@ -16,7 +16,7 @@ struct TorrentDetailView: View {
         Group {
             if isLoading && files.isEmpty {
                 ProgressView("正在加载文件...")
-            } else if files.isEmpty && !errorText.isEmpty {
+            } else if files.isEmpty && !(errorText?.isEmpty ?? true) {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 36))

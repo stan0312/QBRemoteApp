@@ -1,5 +1,16 @@
 import SwiftUI
 
+/// 任务列表排序方式
+enum SortOption: String, CaseIterable {
+    case addDesc = "添加时间 (新→旧)"
+    case addAsc = "添加时间 (旧→新)"
+    case sizeDesc = "大小 (大→小)"
+    case sizeAsc = "大小 (小→大)"
+    case nameAsc = "名称 (A→Z)"
+    case progressAsc = "进度 (未完成在前)"
+    case progressDesc = "进度 (已完成在前)"
+}
+
 /// 任务列表页
 struct TorrentListView: View {
     @ObservedObject var qb: QBClient
@@ -14,6 +25,20 @@ struct TorrentListView: View {
     @State private var showDeleteDialog = false
     @State private var opMessage: String?
     @State private var showOpMessage = false
+    @State private var sortOption: SortOption = .addDesc
+
+    /// 按当前排序方式排序
+    private var sortedTorrents: [TorrentInfo] {
+        switch sortOption {
+        case .addDesc: return torrents.sorted { $0.added_on > $1.added_on }
+        case .addAsc: return torrents.sorted { $0.added_on < $1.added_on }
+        case .sizeDesc: return torrents.sorted { $0.size > $1.size }
+        case .sizeAsc: return torrents.sorted { $0.size < $1.size }
+        case .nameAsc: return torrents.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .progressAsc: return torrents.sorted { $0.progress < $1.progress }
+        case .progressDesc: return torrents.sorted { $0.progress > $1.progress }
+        }
+    }
 
     var body: some View {
         NavigationView {
@@ -48,7 +73,7 @@ struct TorrentListView: View {
                     }
                 } else {
                     List {
-                        ForEach(torrents) { t in
+                        ForEach(sortedTorrents) { t in
                             NavigationLink(destination: TorrentDetailView(qb: qb, fb: fb, settings: settings, torrent: t)) {
                                 TorrentRow(torrent: t)
                             }
@@ -73,6 +98,16 @@ struct TorrentListView: View {
                             showAdd = true
                         } label: {
                             Image(systemName: "plus")
+                        }
+                        // 排序
+                        Menu {
+                            Picker("排序方式", selection: $sortOption) {
+                                ForEach(SortOption.allCases, id: \.self) { opt in
+                                    Text(opt.rawValue).tag(opt)
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "arrow.up.arrow.down")
                         }
                         Menu {
                             Button("暂停全部") { Task { await runOp("pause", hashes: ["all"]) } }

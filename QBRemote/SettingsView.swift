@@ -29,9 +29,9 @@ struct SettingsView: View {
                     SecureField("密码", text: $settings.fbPassword)
                 }
 
-                Section(header: Text("路径映射"),
-                        footer: Text("qB 任务保存路径的前缀（如 /Video），去掉后会拼到 FileBrowser 根目录。例如 qB 的 /Video/Movie/xx.mkv 对应 FileBrowser 的 /Movie/xx.mkv。")) {
-                    TextField("qB 路径前缀", text: $settings.pathPrefix)
+                Section(header: Text("路径映射（可选）"),
+                        footer: Text("留空为自动模式：App 自动用 qB 保存路径的最后一级目录映射到 FileBrowser（例如 qB 保存到 /vol2/.../Movie 会对应 FileBrowser 的 /Movie）。仅当自动映射不正确时，才需要手动填写前缀。")) {
+                    TextField("留空自动映射", text: $settings.pathPrefix)
                         .autocapitalization(.none)
                 }
 

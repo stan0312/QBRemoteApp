@@ -53,21 +53,60 @@ class FileBrowserClient: ObservableObject {
         return token
     }
 
-    /// 由 qB 保存路径（含文件名）构造 FileBrowser 可访问的 raw URL
-    /// 映射规则：把 pathPrefix 前缀去掉后拼到 /api/raw 后面
-    func rawURL(forQbPath qbPath: String, prefix: String) -> URL? {
-        var rel = qbPath
-        // 去掉前缀（如 /Video）
-        if !prefix.isEmpty, rel.hasPrefix(prefix) {
-            rel = String(rel.dropFirst(prefix.count))
+    /// 计算 filebrowser 相对路径（含映射规则）
+    /// - Parameters:
+    ///   - savePath: qB 的保存路径（如 /vol2/1000/Download/Movie）
+    ///   - relativeName: 文件在种子内的相对路径（如 电影/xxx.mkv）
+    ///   - prefix: 手动配置的前缀（如 /Movie）；为空则自动用 save_path 的最后一段作为 filebrowser 顶层目录
+    func fbRelativePath(savePath: String, relativeName: String, prefix: String) -> String {
+        if !prefix.isEmpty {
+            // 手动模式：完整路径（savePath + 相对名）去掉 prefix 前缀
+            var full = savePath
+            if !full.hasSuffix("/") { full += "/" }
+            full += relativeName
+            if full.hasPrefix(prefix) {
+                var rel = String(full.dropFirst(prefix.count))
+                if !rel.hasPrefix("/") { rel = "/" + rel }
+                return rel
+            }
         }
-        if !rel.hasPrefix("/") {
-            rel = "/" + rel
-        }
+        // 自动模式：qB save_path 的最后一段（如 Movie）映射为 filebrowser 顶层目录
+        let last = (savePath as NSString).lastPathComponent
+        var rel = relativeName
+        if !rel.hasPrefix("/") { rel = "/" + rel }
+        return "/" + last + rel
+    }
+
+    /// 构造 FileBrowser 可访问的 raw URL（带 X-Auth 认证，App 内播放用）
+    func rawURL(savePath: String, relativeName: String, prefix: String) -> URL? {
+        let rel = fbRelativePath(savePath: savePath, relativeName: relativeName, prefix: prefix)
         guard let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
             return nil
         }
         return URL(string: baseURL + "/api/raw" + encoded)
+    }
+
+    /// 构造 WebDAV URL（Basic 认证内嵌，供 VLC 等第三方播放器使用）
+    func davURL(savePath: String, relativeName: String, prefix: String,
+                username: String, password: String) -> URL? {
+        let rel = fbRelativePath(savePath: savePath, relativeName: relativeName, prefix: prefix)
+        guard let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let base = URL(string: baseURL),
+              let host = base.host else {
+            return nil
+        }
+        let port = base.port.map { ":\($0)" } ?? ""
+        let user = username.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? username
+        let pass = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? password
+        return URL(string: "webdav://\(user):\(pass)@\(host)\(port)/dav\(encoded)")
+    }
+
+    /// 生成唤起 VLC 的 x-callback URL（stream 播放远程 WebDAV 文件）
+    func vlcOpenURL(davURL: URL) -> URL? {
+        guard let enc = davURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            return nil
+        }
+        return URL(string: "vlc-x-callback://x-callback-url/stream?url=" + enc)
     }
 
     /// 带认证（X-Auth header）的 URLRequest，用于加载图片等
@@ -76,6 +115,13 @@ class FileBrowserClient: ObservableObject {
         var req = URLRequest(url: url)
         req.setValue(token, forHTTPHeaderField: "X-Auth")
         return req
+    }
+
+    /// Basic 认证头（用于 WebDAV 下载等）
+    func basicAuthHeader(username: String, password: String) -> String? {
+        let s = "\(username):\(password)"
+        guard let data = s.data(using: .utf8) else { return nil }
+        return "Basic " + data.base64EncodedString()
     }
 }
 

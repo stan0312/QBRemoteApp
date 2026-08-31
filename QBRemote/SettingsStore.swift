@@ -9,7 +9,7 @@ final class SettingsStore: ObservableObject {
     @Published var fbURL: String
     @Published var fbUsername: String
     @Published var fbPassword: String
-    /// qB 保存路径前缀，用于映射到 FileBrowser 根目录（如 /Video）
+    /// 手动路径前缀（可选）。留空时自动用 qB 保存路径的最后一级目录映射到 FileBrowser 根目录
     @Published var pathPrefix: String
 
     private let defaults = UserDefaults.standard
@@ -21,7 +21,7 @@ final class SettingsStore: ObservableObject {
         fbURL = defaults.string(forKey: "fbURL") ?? "http://sdcs.asuscomm.com:8033"
         fbUsername = defaults.string(forKey: "fbUsername") ?? "admin"
         fbPassword = defaults.string(forKey: "fbPassword") ?? ""
-        pathPrefix = defaults.string(forKey: "pathPrefix") ?? "/Video"
+        pathPrefix = defaults.string(forKey: "pathPrefix") ?? ""
     }
 
     /// 设置是否已填完整

@@ -56,7 +56,7 @@ struct TorrentFile: Identifiable, Codable, Hashable {
     let name: String
     let size: Int64
     let progress: Double
-    let priority: Int
+    var priority: Int
 
     var id: Int { index }
 
@@ -122,6 +122,21 @@ final class FileTreeNode: Identifiable, ObservableObject {
         self.name = name
         self.isDirectory = isDirectory
         self.file = file
+    }
+
+    /// 递归收集该节点（含子节点）下的所有文件
+    var allFiles: [TorrentFile] {
+        if let file = file { return [file] }
+        var result: [TorrentFile] = []
+        for c in children {
+            result += c.allFiles
+        }
+        return result
+    }
+
+    /// 该目录下是否有未选中的文件（priority == 0）
+    var hasUnselected: Bool {
+        allFiles.contains { $0.priority == 0 }
     }
 
     /// 由扁平文件列表构建目录树

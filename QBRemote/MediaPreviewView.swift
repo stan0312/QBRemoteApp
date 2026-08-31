@@ -3,6 +3,8 @@ import AVKit
 import AVFoundation
 
 /// 媒体预览页：视频 / 音频 / 图片
+/// - mp4/mov/m4v 等：App 内 AVPlayer 直接播放（带 X-Auth 认证）
+/// - mkv 等 iOS 原生不支持的容器：用 VLC（WebDAV Basic 认证）打开，或保存到文件 App
 struct MediaPreviewView: View {
     @ObservedObject var fb: FileBrowserClient
     @ObservedObject var settings: SettingsStore
@@ -14,22 +16,24 @@ struct MediaPreviewView: View {
     @State private var image: UIImage?
     @State private var imageError = false
     @State private var showShare = false
+    @State private var localFileURL: URL?
+    @State private var downloading = false
+    @State private var downloadError: String?
 
-    /// qB 完整路径（save_path + 文件相对路径）
-    private var qbFullPath: String {
-        var p = torrent.save_path
-        if !p.hasSuffix("/") { p += "/" }
-        return p + file.name
-    }
-
-    /// FileBrowser raw URL
+    /// FileBrowser raw URL（App 内认证播放）
     private var rawURL: URL? {
-        fb.rawURL(forQbPath: qbFullPath, prefix: settings.pathPrefix)
+        fb.rawURL(savePath: torrent.save_path, relativeName: file.name, prefix: settings.pathPrefix)
     }
 
-    /// AVPlayer 是否原生支持该格式（MKV 等不支持）
+    /// WebDAV URL（VLC 用）
+    private var davURL: URL? {
+        fb.davURL(savePath: torrent.save_path, relativeName: file.name, prefix: settings.pathPrefix,
+                  username: settings.fbUsername, password: settings.fbPassword)
+    }
+
+    /// AVPlayer 是否原生支持该格式（MKV/AVI/WMV/FLV/WebM 等不支持）
     private var isNativePlayable: Bool {
-        !file.isVideo || ["mp4", "mov", "m4v"].contains(file.fileExtension)
+        !file.isVideo || ["mp4", "mov", "m4v", "3gp", "m4a"].contains(file.fileExtension)
     }
 
     var body: some View {
@@ -39,7 +43,12 @@ struct MediaPreviewView: View {
             if file.isImage {
                 imageContent
             } else if file.isVideo || file.isAudio {
-                videoAudioContent
+                if file.isVideo, !isNativePlayable {
+                    unsupportedContent
+                } else {
+                    VideoPlayer(player: player)
+                        .ignoresSafeArea()
+                }
             }
         }
         .overlay(alignment: .topTrailing) {
@@ -58,6 +67,11 @@ struct MediaPreviewView: View {
         .onDisappear {
             player?.pause()
             player = nil
+        }
+        .sheet(isPresented: $showShare) {
+            if let url = localFileURL {
+                ShareSheet(items: [url])
+            }
         }
     }
 
@@ -87,43 +101,110 @@ struct MediaPreviewView: View {
         }
     }
 
-    // MARK: - 视频 / 音频
+    // MARK: - 不支持的视频格式（MKV 等）
 
     @ViewBuilder
-    private var videoAudioContent: some View {
-        if file.isVideo, !isNativePlayable {
-            // MKV 等 iOS 原生播放器不支持的格式
-            VStack(spacing: 16) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 44))
-                    .foregroundColor(.orange)
-                Text("iOS 原生播放器不支持 .\(file.fileExtension) 格式")
-                    .font(.headline)
+    private var unsupportedContent: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "film.stack")
+                .font(.system(size: 48))
+                .foregroundColor(.orange)
+            Text(".\(file.fileExtension) 格式")
+                .font(.title3.bold())
+                .foregroundColor(.white)
+            Text("iOS 原生播放器不支持 .\(file.fileExtension) 容器，\n可通过 VLC 播放或保存到本地。")
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+
+            if let vlcURL = vlcCallbackURL {
+                Button {
+                    UIApplication.shared.open(vlcURL)
+                } label: {
+                    Label("用 VLC 播放", systemImage: "play.circle.fill")
+                        .padding()
+                        .frame(maxWidth: 260)
+                        .background(Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                }
+                Text("需在 App Store 安装免费的 VLC 播放器")
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.5))
+            }
+
+            Button {
+                downloadAndSave()
+            } label: {
+                if downloading {
+                    HStack {
+                        ProgressView().tint(.white)
+                        Text("下载中...")
+                    }
+                    .padding()
+                    .frame(maxWidth: 260)
+                    .background(Color.gray.opacity(0.3))
                     .foregroundColor(.white)
-                Text("建议用第三方播放器（nPlayer / Infuse / VLC）打开")
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.7))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-                if let url = rawURL {
-                    Button {
-                        showShare = true
-                    } label: {
-                        Label("分享到其他播放器", systemImage: "square.and.arrow.up")
-                            .padding()
-                            .background(Color.blue)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                    }
-                    .sheet(isPresented: $showShare) {
-                        ShareSheet(items: [url])
-                    }
+                    .cornerRadius(12)
+                } else {
+                    Label("保存到文件", systemImage: "square.and.arrow.down")
+                        .padding()
+                        .frame(maxWidth: 260)
+                        .background(Color.gray.opacity(0.4))
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
                 }
             }
-        } else {
-            VideoPlayer(player: player)
-                .ignoresSafeArea()
+            .disabled(downloading)
+
+            if let downloadError = downloadError {
+                Text(downloadError)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
         }
+    }
+
+    /// VLC x-callback 唤起 URL
+    private var vlcCallbackURL: URL? {
+        guard let dav = davURL else { return nil }
+        return fb.vlcOpenURL(davURL: dav)
+    }
+
+    /// 下载到本地临时文件，然后通过分享面板保存到"文件"App
+    private func downloadAndSave() {
+        guard let url = rawURL, let token = fb.token else {
+            downloadError = "FileBrowser 未登录或地址错误"
+            return
+        }
+        downloading = true
+        downloadError = nil
+        var req = URLRequest(url: url)
+        req.setValue(token, forHTTPHeaderField: "X-Auth")
+        URLSession.shared.downloadTask(with: req) { tempURL, resp, err in
+            DispatchQueue.main.async {
+                downloading = false
+                if let err = err {
+                    downloadError = "下载失败: \(err.localizedDescription)"
+                    return
+                }
+                guard let tempURL = tempURL else {
+                    downloadError = "下载失败"
+                    return
+                }
+                let dest = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(file.fileName)
+                try? FileManager.default.removeItem(at: dest)
+                do {
+                    try FileManager.default.moveItem(at: tempURL, to: dest)
+                    localFileURL = dest
+                    showShare = true
+                } catch {
+                    downloadError = "保存失败: \(error.localizedDescription)"
+                }
+            }
+        }.resume()
     }
 
     // MARK: - 初始化播放
@@ -133,8 +214,8 @@ struct MediaPreviewView: View {
 
         if file.isImage {
             loadImage(url: url, token: token)
-        } else {
-            // 视频/音频：带 X-Auth header 播放
+        } else if file.isVideo || file.isAudio {
+            // 带 X-Auth header 播放（AVPlayer 支持格式）
             let headers = ["X-Auth": token]
             let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
             let item = AVPlayerItem(asset: asset)
@@ -159,7 +240,7 @@ struct MediaPreviewView: View {
     }
 }
 
-/// 系统分享面板（用于 MKV 等分享给第三方播放器）
+/// 系统分享面板（保存到文件 / 分享给第三方）
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]
 

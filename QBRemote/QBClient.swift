@@ -115,6 +115,21 @@ class QBClient: ObservableObject {
         try checkAuth(resp)
     }
 
+    /// 设置文件优先级（0=跳过/不下载, 1=正常, 6=高, 7=最高）
+    func setFilePriority(hash: String, ids: [Int], priority: Int) async throws {
+        var comps = URLComponents(string: baseURL + "/api/v2/torrents/filePrio")!
+        comps.queryItems = [
+            URLQueryItem(name: "hash", value: hash),
+            URLQueryItem(name: "id", value: ids.map(String.init).joined(separator: ",")),
+            URLQueryItem(name: "priority", value: "\(priority)")
+        ]
+        guard let url = comps.url else { throw QBError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let (_, resp) = try await session.data(for: req)
+        try checkAuth(resp)
+    }
+
     /// 删除任务
     func delete(hashes: [String], deleteFiles: Bool) async throws {
         var comps = URLComponents(string: baseURL + "/api/v2/torrents/delete")!

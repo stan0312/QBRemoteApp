@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 任务详情：按目录树显示文件 + 预览
+/// 任务详情：按目录树显示文件 + 预览 + 勾选下载/不下载
 struct TorrentDetailView: View {
     @ObservedObject var qb: QBClient
     @ObservedObject var fb: FileBrowserClient
@@ -13,6 +13,8 @@ struct TorrentDetailView: View {
     @State private var errorText: String?
     @State private var previewingFile: TorrentFile?
     @State private var allExpanded = false
+    @State private var opMessage: String?
+    @State private var showOpMessage = false
 
     var body: some View {
         Group {
@@ -36,25 +38,28 @@ struct TorrentDetailView: View {
             } else {
                 List {
                     // 目录操作行
-                    Button {
-                        toggleAll()
-                    } label: {
-                        HStack {
-                            Image(systemName: allExpanded ? "arrow.up.right.square" : "arrow.down.right.square")
-                            Text(allExpanded ? "全部折叠" : "全部展开")
-                                .font(.caption.weight(.medium))
-                            Spacer()
-                            Text("\(files.count) 个文件")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
+                    HStack {
+                        Button {
+                            toggleAll()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: allExpanded ? "arrow.up.right.square" : "arrow.down.right.square")
+                                Text(allExpanded ? "全部折叠" : "全部展开")
+                                    .font(.caption.weight(.medium))
+                            }
+                            .foregroundColor(.blue)
                         }
+                        Spacer()
+                        Text("\(files.count) 个文件 · 勾选=下载")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                     }
-                    .foregroundColor(.blue)
 
                     ForEach(treeNodes) { node in
-                        FileTreeNodeView(node: node, onTap: { file in
-                            handleTap(file)
-                        })
+                        FileTreeNodeView(node: node,
+                                         onToggleFile: { file in toggleFile(file) },
+                                         onToggleFolder: { n in toggleFolder(n) },
+                                         onPreview: { file in handleTap(file) })
                     }
                 }
                 .refreshable { await load() }
@@ -66,20 +71,25 @@ struct TorrentDetailView: View {
         .fullScreenCover(item: $previewingFile) { file in
             MediaPreviewView(fb: fb, settings: settings, file: file, torrent: torrent)
         }
+        .alert("提示", isPresented: $showOpMessage) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(opMessage ?? "")
+        }
     }
+
+    // MARK: - 加载
 
     private func load() async {
         isLoading = true
         errorText = nil
         do {
             if !qb.isLoggedIn {
-                _ = try await qb.login(username: UserDefaults.standard.string(forKey: "qbUsername") ?? "",
-                                       password: UserDefaults.standard.string(forKey: "qbPassword") ?? "")
+                _ = try await qb.login(username: settings.qbUsername,
+                                       password: settings.qbPassword)
             }
             files = try await qb.fetchFiles(hash: torrent.hash)
-            // 构建目录树
             let tree = FileTreeNode.buildTree(from: files)
-            // 文件多时默认展开一层，否则全部展开
             if tree.count <= 10 {
                 setAll(tree, expanded: true)
                 allExpanded = true
@@ -90,6 +100,8 @@ struct TorrentDetailView: View {
         }
         isLoading = false
     }
+
+    // MARK: - 展开/折叠
 
     private func toggleAll() {
         allExpanded.toggle()
@@ -103,10 +115,39 @@ struct TorrentDetailView: View {
         }
     }
 
+    // MARK: - 勾选下载/不下载
+
+    private func toggleFile(_ file: TorrentFile) {
+        let newPrio = file.priority > 0 ? 0 : 1
+        Task { await setPriority(ids: [file.index], priority: newPrio) }
+    }
+
+    private func toggleFolder(_ node: FileTreeNode) {
+        let fs = node.allFiles
+        guard !fs.isEmpty else { return }
+        // 全部已选 -> 全部取消；否则全部选中
+        let allSelected = fs.allSatisfy { $0.priority > 0 }
+        let newPrio = allSelected ? 0 : 1
+        Task { await setPriority(ids: fs.map { $0.index }, priority: newPrio) }
+    }
+
+    private func setPriority(ids: [Int], priority: Int) async {
+        do {
+            try await qb.setFilePriority(hash: torrent.hash, ids: ids, priority: priority)
+            await load()
+        } catch {
+            opMessage = "设置失败: \(error.localizedDescription)"
+            showOpMessage = true
+        }
+    }
+
+    // MARK: - 预览
+
     private func handleTap(_ file: TorrentFile) {
         guard file.isPreviewable else { return }
         guard fb.token != nil else {
-            errorText = "FileBrowser 未登录，请返回设置检查"
+            opMessage = "FileBrowser 未登录，请返回设置检查"
+            showOpMessage = true
             return
         }
         previewingFile = file
@@ -116,70 +157,109 @@ struct TorrentDetailView: View {
 /// 目录树节点视图（递归）
 struct FileTreeNodeView: View {
     @ObservedObject var node: FileTreeNode
-    let onTap: (TorrentFile) -> Void
+    let onToggleFile: (TorrentFile) -> Void
+    let onToggleFolder: (FileTreeNode) -> Void
+    let onPreview: (TorrentFile) -> Void
 
     var body: some View {
         if node.isDirectory {
             DisclosureGroup(isExpanded: $node.isExpanded) {
                 ForEach(node.children) { child in
-                    FileTreeNodeView(node: child, onTap: onTap)
+                    FileTreeNodeView(node: child,
+                                     onToggleFile: onToggleFile,
+                                     onToggleFolder: onToggleFolder,
+                                     onPreview: onPreview)
                 }
             } label: {
-                Label(node.name, systemImage: node.isExpanded ? "folder.fill" : "folder")
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
-            }
-        } else {
-            if let file = node.file {
-                Button {
-                    onTap(file)
-                } label: {
-                    FileRow(file: file)
+                HStack(spacing: 8) {
+                    Image(systemName: node.isExpanded ? "folder.fill" : "folder")
+                        .foregroundColor(.blue)
+                    Text(node.name)
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    Spacer()
+                    // 文件夹级勾选：全选 / 全不选
+                    Button {
+                        onToggleFolder(node)
+                    } label: {
+                        folderCheckImage
+                    }
+                    .buttonStyle(.plain)
                 }
-                .disabled(!file.isPreviewable)
             }
+        } else if let file = node.file {
+            FileRow(file: file,
+                    onToggleDownload: { onToggleFile(file) },
+                    onPreview: { onPreview(file) })
         }
+    }
+
+    private var folderCheckImage: some View {
+        let allSelected = !node.hasUnselected
+        return Image(systemName: allSelected ? "checkmark.circle.fill" : "circle")
+            .foregroundColor(allSelected ? .blue : .gray.opacity(0.6))
+            .font(.system(size: 20))
     }
 }
 
-/// 文件行
+/// 文件行：勾选下载 + 预览
 struct FileRow: View {
     let file: TorrentFile
+    let onToggleDownload: () -> Void
+    let onPreview: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: file.iconName)
-                .font(.system(size: 20))
-                .foregroundColor(file.isPreviewable ? .blue : .gray)
-                .frame(width: 30)
+        HStack(spacing: 10) {
+            // 勾选框：勾选 = 下载，取消 = 跳过
+            Button {
+                onToggleDownload()
+            } label: {
+                Image(systemName: file.priority > 0 ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(file.priority > 0 ? .blue : .gray.opacity(0.6))
+                    .font(.system(size: 20))
+            }
+            .buttonStyle(.plain)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(file.fileName)
-                    .font(.subheadline)
-                    .foregroundColor(file.isPreviewable ? .primary : .secondary)
-                    .lineLimit(2)
+            // 主体（点按预览，仅可预览类型）
+            Button {
+                onPreview()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: file.iconName)
+                        .font(.system(size: 18))
+                        .foregroundColor(file.isPreviewable ? .blue : .gray)
+                        .frame(width: 26)
 
-                HStack {
-                    Text(formatSize(file.size))
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    if file.progress < 1.0 {
-                        Text("\(Int(file.progress * 100))%")
-                            .font(.caption2)
-                            .foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(file.fileName)
+                            .font(.subheadline)
+                            .foregroundColor(file.priority > 0 ? .primary : .secondary)
+                            .lineLimit(2)
+                        HStack {
+                            Text(formatSize(file.size))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            if file.progress < 1.0 && file.priority > 0 {
+                                Text("\(Int(file.progress * 100))%")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+                            Spacer()
+                            if file.isPreviewable {
+                                Image(systemName: "play.circle")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(.blue)
+                            }
+                        }
                     }
-                    Spacer()
-                    if file.isPreviewable {
-                        Image(systemName: "play.circle")
-                            .font(.system(size: 16))
-                            .foregroundColor(.blue)
-                    }
+
+                    ProgressView(value: file.progress)
+                        .frame(width: 40)
+                        .tint(file.progress >= 1.0 ? .green : .blue)
                 }
             }
-
-            ProgressView(value: file.progress)
-                .frame(width: 40)
-                .tint(file.progress >= 1.0 ? .green : .blue)
+            .buttonStyle(.plain)
+            .disabled(!file.isPreviewable)
         }
         .padding(.vertical, 2)
     }

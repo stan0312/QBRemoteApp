@@ -88,6 +88,20 @@ class QBClient: ObservableObject {
         }
     }
 
+    /// POST form-urlencoded 请求（qB 的 POST 接口要求参数放在 body 中，放 URL query 会返回 400/405）
+    private func postForm(_ path: String, params: [String: String]) async throws -> (Data, URLResponse) {
+        guard let url = URL(string: baseURL + path) else { throw QBError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var comps = URLComponents()
+        comps.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
+        req.httpBody = comps.query?.data(using: .utf8)
+        let (data, resp) = try await session.data(for: req)
+        try checkAuth(resp)
+        return (data, resp)
+    }
+
     // MARK: - 任务操作
 
     /// 暂停任务（hashes 为 "all" 表示全部）
@@ -106,67 +120,44 @@ class QBClient: ObservableObject {
     }
 
     private func torrentAction(action: String, hashes: [String]) async throws {
-        var comps = URLComponents(string: baseURL + "/api/v2/torrents/" + action)!
-        comps.queryItems = [URLQueryItem(name: "hashes", value: hashes.isEmpty ? "all" : hashes.joined(separator: "|"))]
-        guard let url = comps.url else { throw QBError.invalidURL }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        let (_, resp) = try await session.data(for: req)
-        try checkAuth(resp)
+        let params = ["hashes": hashes.isEmpty ? "all" : hashes.joined(separator: "|")]
+        _ = try await postForm("/api/v2/torrents/" + action, params: params)
     }
 
     /// 设置文件优先级（0=跳过/不下载, 1=正常, 6=高, 7=最高）
     func setFilePriority(hash: String, ids: [Int], priority: Int) async throws {
-        var comps = URLComponents(string: baseURL + "/api/v2/torrents/filePrio")!
-        comps.queryItems = [
-            URLQueryItem(name: "hash", value: hash),
-            URLQueryItem(name: "id", value: ids.map(String.init).joined(separator: ",")),
-            URLQueryItem(name: "priority", value: "\(priority)")
+        let params = [
+            "hash": hash,
+            "id": ids.map(String.init).joined(separator: ","),
+            "priority": "\(priority)"
         ]
-        guard let url = comps.url else { throw QBError.invalidURL }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        let (_, resp) = try await session.data(for: req)
-        try checkAuth(resp)
+        _ = try await postForm("/api/v2/torrents/filePrio", params: params)
     }
 
     /// 删除任务
     func delete(hashes: [String], deleteFiles: Bool) async throws {
-        var comps = URLComponents(string: baseURL + "/api/v2/torrents/delete")!
-        comps.queryItems = [
-            URLQueryItem(name: "hashes", value: hashes.joined(separator: "|")),
-            URLQueryItem(name: "deleteFiles", value: deleteFiles ? "true" : "false")
+        let params = [
+            "hashes": hashes.joined(separator: "|"),
+            "deleteFiles": deleteFiles ? "true" : "false"
         ]
-        guard let url = comps.url else { throw QBError.invalidURL }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        let (_, resp) = try await session.data(for: req)
-        try checkAuth(resp)
+        _ = try await postForm("/api/v2/torrents/delete", params: params)
     }
 
     // MARK: - 添加任务
 
     /// 添加磁力链接/HTTP 种子（urls 用换行分隔，可多个）
     func addTorrents(urls: String, savePath: String? = nil, paused: Bool = false) async throws {
-        guard var comps = URLComponents(string: baseURL + "/api/v2/torrents/add") else {
-            throw QBError.invalidURL
-        }
-        var items = [URLQueryItem]()
+        var params: [String: String] = [:]
         if !urls.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            items.append(URLQueryItem(name: "urls", value: urls))
+            params["urls"] = urls
         }
         if let savePath = savePath, !savePath.isEmpty {
-            items.append(URLQueryItem(name: "savepath", value: savePath))
+            params["savepath"] = savePath
         }
         if paused {
-            items.append(URLQueryItem(name: "paused", value: "true"))
+            params["paused"] = "true"
         }
-        comps.queryItems = items
-        guard let url = comps.url else { throw QBError.invalidURL }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        let (_, resp) = try await session.data(for: req)
-        try checkAuth(resp)
+        _ = try await postForm("/api/v2/torrents/add", params: params)
     }
 
     /// 上传 .torrent 文件添加任务
@@ -227,13 +218,8 @@ class QBClient: ObservableObject {
     }
 
     private func transferAction(action: String, value: Int) async throws {
-        var comps = URLComponents(string: baseURL + "/api/v2/transfer/" + action)!
-        comps.queryItems = [URLQueryItem(name: "limit", value: "\(value)")]
-        guard let url = comps.url else { throw QBError.invalidURL }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        let (_, resp) = try await session.data(for: req)
-        try checkAuth(resp)
+        let params = ["limit": "\(value)"]
+        _ = try await postForm("/api/v2/transfer/" + action, params: params)
     }
 }
 

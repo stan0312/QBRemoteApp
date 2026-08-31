@@ -573,7 +573,7 @@ struct VLCFullScreenPlayer: View {
                 position = Double(player.position)
             }
             let cur = player.time.intValue
-            let len = player.length.intValue
+            let len = player.media?.length?.intValue ?? 0
             curText = formatTime(Int(cur / 1000))
             if len > 0 {
                 durText = formatTime(Int(len / 1000))

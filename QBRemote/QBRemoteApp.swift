@@ -4,7 +4,7 @@ import SwiftUI
 struct QBRemoteApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
         }
     }
 }

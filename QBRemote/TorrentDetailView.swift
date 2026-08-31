@@ -15,6 +15,8 @@ struct TorrentDetailView: View {
     @State private var allExpanded = false
     @State private var opMessage: String?
     @State private var showOpMessage = false
+    @State private var pendingDeleteFile: TorrentFile?
+    @State private var showDeleteFileDialog = false
 
     var body: some View {
         Group {
@@ -59,7 +61,8 @@ struct TorrentDetailView: View {
                         FileTreeNodeView(node: node,
                                          onToggleFile: { file in toggleFile(file) },
                                          onToggleFolder: { n in toggleFolder(n) },
-                                         onPreview: { file in handleTap(file) })
+                                         onPreview: { file in handleTap(file) },
+                                         onDeleteFile: { file in pendingDeleteFile = file; showDeleteFileDialog = true })
                     }
                 }
                 .refreshable { await load() }
@@ -75,6 +78,14 @@ struct TorrentDetailView: View {
             Button("好", role: .cancel) {}
         } message: {
             Text(opMessage ?? "")
+        }
+        .confirmationDialog("删除文件", isPresented: $showDeleteFileDialog, presenting: pendingDeleteFile) { file in
+            Button("删除「\(file.name)」", role: .destructive) {
+                Task { await deleteFile(file) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { _ in
+            Text("将永久删除 NAS 上的文件。删除后任务会显示文件缺失，建议稍后重新校验该任务。")
         }
     }
 
@@ -152,6 +163,28 @@ struct TorrentDetailView: View {
         }
         previewingFile = file
     }
+
+    // MARK: - 删除文件
+
+    private func deleteFile(_ file: TorrentFile) async {
+        guard fb.token != nil else {
+            opMessage = "FileBrowser 未登录，请返回设置检查"
+            showOpMessage = true
+            return
+        }
+        let rel = fb.fbRelativePath(savePath: torrent.save_path,
+                                    relativeName: file.name,
+                                    prefix: settings.pathPrefix)
+        do {
+            try await fb.deleteResource(relativePath: rel)
+            await load()
+            opMessage = "已删除「\(file.fileName)」\n任务会显示文件缺失，可在任务列表长按选择「重新校验」"
+            showOpMessage = true
+        } catch {
+            opMessage = "删除失败: \(error.localizedDescription)"
+            showOpMessage = true
+        }
+    }
 }
 
 /// 目录树节点视图（递归）
@@ -160,6 +193,7 @@ struct FileTreeNodeView: View {
     let onToggleFile: (TorrentFile) -> Void
     let onToggleFolder: (FileTreeNode) -> Void
     let onPreview: (TorrentFile) -> Void
+    let onDeleteFile: (TorrentFile) -> Void
 
     var body: some View {
         if node.isDirectory {
@@ -168,7 +202,8 @@ struct FileTreeNodeView: View {
                     FileTreeNodeView(node: child,
                                      onToggleFile: onToggleFile,
                                      onToggleFolder: onToggleFolder,
-                                     onPreview: onPreview)
+                                     onPreview: onPreview,
+                                     onDeleteFile: onDeleteFile)
                 }
             } label: {
                 HStack(spacing: 8) {
@@ -190,7 +225,8 @@ struct FileTreeNodeView: View {
         } else if let file = node.file {
             FileRow(file: file,
                     onToggleDownload: { onToggleFile(file) },
-                    onPreview: { onPreview(file) })
+                    onPreview: { onPreview(file) },
+                    onDelete: { onDeleteFile(file) })
         }
     }
 
@@ -202,11 +238,12 @@ struct FileTreeNodeView: View {
     }
 }
 
-/// 文件行：勾选下载 + 预览
+/// 文件行：勾选下载 + 预览 + 长按删除
 struct FileRow: View {
     let file: TorrentFile
     let onToggleDownload: () -> Void
     let onPreview: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
@@ -262,6 +299,20 @@ struct FileRow: View {
             .disabled(!file.isPreviewable)
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            Button {
+                onPreview()
+            } label: {
+                Label("预览", systemImage: "play.circle")
+            }
+            .disabled(!file.isPreviewable)
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Label("删除文件", systemImage: "trash")
+            }
+        }
     }
 
     private func formatSize(_ bytes: Int64) -> String {

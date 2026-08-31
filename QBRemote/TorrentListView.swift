@@ -11,6 +11,32 @@ enum SortOption: String, CaseIterable {
     case progressDesc = "进度 (已完成在前)"
 }
 
+/// 状态分类标签
+enum StatusFilter: String, CaseIterable {
+    case all = "全部"
+    case downloading = "下载中"
+    case seeding = "做种中"
+    case completed = "已完成"
+    case paused = "暂停"
+    case error = "错误"
+
+    func matches(_ t: TorrentInfo) -> Bool {
+        switch self {
+        case .all: return true
+        case .downloading:
+            return ["downloading", "forcedDL", "metaDL", "stalledDL", "checkingDL"].contains(t.state)
+        case .seeding:
+            return ["uploading", "forcedUP", "stalledUP", "checkingUP"].contains(t.state)
+        case .completed:
+            return t.progress >= 1.0
+        case .paused:
+            return ["pausedDL", "pausedUP", "stoppedDL", "stoppedUP", "queuedDL", "queuedUP"].contains(t.state)
+        case .error:
+            return ["error", "missingFiles"].contains(t.state)
+        }
+    }
+}
+
 /// 任务列表页
 struct TorrentListView: View {
     @ObservedObject var qb: QBClient
@@ -26,17 +52,39 @@ struct TorrentListView: View {
     @State private var opMessage: String?
     @State private var showOpMessage = false
     @State private var sortOption: SortOption = .addDesc
+    @State private var statusFilter: StatusFilter = .all
+    @State private var trackerFilter: String? = nil
+    @State private var totalDL: Int64 = 0
+    @State private var totalUP: Int64 = 0
 
-    /// 按当前排序方式排序
-    private var sortedTorrents: [TorrentInfo] {
+    /// 所有任务中出现过的 Tracker 域名
+    private var trackerDomains: [String] {
+        var set = Set<String>()
+        for t in torrents {
+            let d = trackerDomain(t.tracker)
+            if !d.isEmpty { set.insert(d) }
+        }
+        return set.sorted()
+    }
+
+    private func trackerDomain(_ url: String?) -> String {
+        guard let url = url, let u = URL(string: url), let host = u.host else { return "" }
+        return host
+    }
+
+    /// 按状态 + Tracker 筛选，再按排序方式排序
+    private var filteredTorrents: [TorrentInfo] {
+        let list = torrents.filter { t in
+            statusFilter.matches(t) && (trackerFilter == nil || trackerDomain(t.tracker) == trackerFilter)
+        }
         switch sortOption {
-        case .addDesc: return torrents.sorted { $0.added_on > $1.added_on }
-        case .addAsc: return torrents.sorted { $0.added_on < $1.added_on }
-        case .sizeDesc: return torrents.sorted { $0.size > $1.size }
-        case .sizeAsc: return torrents.sorted { $0.size < $1.size }
-        case .nameAsc: return torrents.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        case .progressAsc: return torrents.sorted { $0.progress < $1.progress }
-        case .progressDesc: return torrents.sorted { $0.progress > $1.progress }
+        case .addDesc: return list.sorted { $0.added_on > $1.added_on }
+        case .addAsc: return list.sorted { $0.added_on < $1.added_on }
+        case .sizeDesc: return list.sorted { $0.size > $1.size }
+        case .sizeAsc: return list.sorted { $0.size < $1.size }
+        case .nameAsc: return list.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .progressAsc: return list.sorted { $0.progress < $1.progress }
+        case .progressDesc: return list.sorted { $0.progress > $1.progress }
         }
     }
 
@@ -72,15 +120,68 @@ struct TorrentListView: View {
                         .buttonStyle(.borderedProminent)
                     }
                 } else {
-                    List {
-                        ForEach(sortedTorrents) { t in
-                            NavigationLink(destination: TorrentDetailView(qb: qb, fb: fb, settings: settings, torrent: t)) {
-                                TorrentRow(torrent: t)
-                            }
-                            .contextMenu { torrentMenu(t) }
+                    VStack(spacing: 0) {
+                        // 全局速度栏
+                        HStack {
+                            Label(formatSpeed(totalDL), systemImage: "arrow.down.circle")
+                                .foregroundColor(.blue)
+                            Spacer()
+                            Text("\(filteredTorrents.count) 个任务")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Label(formatSpeed(totalUP), systemImage: "arrow.up.circle")
+                                .foregroundColor(.green)
                         }
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                        .background(Color(.systemBackground))
+
+                        // 状态分类标签
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(StatusFilter.allCases, id: \.self) { f in
+                                    chip(text: f.rawValue, selected: statusFilter == f) {
+                                        statusFilter = f
+                                    }
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.vertical, 6)
+                        }
+
+                        // Tracker 分类标签
+                        if !trackerDomains.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    chip(text: "全部 Tracker", selected: trackerFilter == nil) {
+                                        trackerFilter = nil
+                                    }
+                                    ForEach(trackerDomains, id: \.self) { d in
+                                        chip(text: d, selected: trackerFilter == d) {
+                                            trackerFilter = d
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal)
+                                .padding(.vertical, 6)
+                            }
+                        }
+
+                        Divider()
+
+                        // 任务列表
+                        List {
+                            ForEach(filteredTorrents) { t in
+                                NavigationLink(destination: TorrentDetailView(qb: qb, fb: fb, settings: settings, torrent: t)) {
+                                    TorrentRow(torrent: t)
+                                }
+                                .contextMenu { torrentMenu(t) }
+                            }
+                        }
+                        .refreshable { await load() }
                     }
-                    .refreshable { await load() }
                 }
             }
             .navigationTitle("下载任务")
@@ -99,7 +200,6 @@ struct TorrentListView: View {
                         } label: {
                             Image(systemName: "plus")
                         }
-                        // 排序
                         Menu {
                             Picker("排序方式", selection: $sortOption) {
                                 ForEach(SortOption.allCases, id: \.self) { opt in
@@ -144,7 +244,40 @@ struct TorrentListView: View {
         } message: {
             Text(opMessage ?? "")
         }
-        .task { await load() }
+        .task {
+            await load()
+            // 每 3 秒静默刷新（速度实时更新）
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                await quietRefresh()
+            }
+        }
+    }
+
+    // MARK: - 分类标签
+
+    private func chip(text: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(text)
+                .font(.caption.weight(selected ? .bold : .regular))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(selected ? Color.blue : Color(.systemGray6))
+                .foregroundColor(selected ? .white : .primary)
+                .cornerRadius(14)
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func formatSpeed(_ bytes: Int64) -> String {
+        if bytes >= 1024 * 1024 {
+            return String(format: "%.1f MB/s", Double(bytes) / 1024 / 1024)
+        } else if bytes >= 1024 {
+            return String(format: "%.0f KB/s", Double(bytes) / 1024)
+        } else {
+            return "0 B/s"
+        }
     }
 
     // MARK: - 单任务操作菜单
@@ -225,10 +358,27 @@ struct TorrentListView: View {
             }
             torrents = try await qb.fetchTorrents()
             torrents.sort { $0.added_on > $1.added_on }
+            updateSpeeds()
         } catch {
             errorText = error.localizedDescription
         }
         isLoading = false
+    }
+
+    /// 静默刷新（不显示加载动画）
+    private func quietRefresh() async {
+        guard qb.isLoggedIn else { return }
+        do {
+            torrents = try await qb.fetchTorrents()
+            updateSpeeds()
+        } catch {
+            // 静默失败，不打扰
+        }
+    }
+
+    private func updateSpeeds() {
+        totalDL = torrents.reduce(0) { $0 + $1.dlspeed }
+        totalUP = torrents.reduce(0) { $0 + $1.upspeed }
     }
 }
 
@@ -247,16 +397,12 @@ struct TorrentRow: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
-                if torrent.dlspeed > 0 {
-                    Text("↓ " + formatSpeed(torrent.dlspeed))
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                }
-                if torrent.upspeed > 0 {
-                    Text("↑ " + formatSpeed(torrent.upspeed))
-                        .font(.caption)
-                        .foregroundColor(.green)
-                }
+                Text("↓ " + formatSpeed(torrent.dlspeed))
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                Text("↑ " + formatSpeed(torrent.upspeed))
+                    .font(.caption)
+                    .foregroundColor(.green)
             }
 
             ProgressView(value: torrent.progress)
@@ -300,7 +446,7 @@ struct TorrentRow: View {
         } else if bytes >= 1024 {
             return String(format: "%.0f KB/s", Double(bytes) / 1024)
         } else {
-            return "\(bytes) B/s"
+            return "0 B/s"
         }
     }
 }
@@ -363,7 +509,6 @@ struct SpeedLimitView: View {
     private func load() async {
         do {
             let info = try await qb.fetchTransferInfo()
-            // transfer/info 返回的是字节/秒，转换为 KB/s
             let dl = info.dl_rate_limit ?? 0
             let up = info.up_rate_limit ?? 0
             DispatchQueue.main.async {

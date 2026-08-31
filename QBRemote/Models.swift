@@ -18,6 +18,8 @@ struct TorrentInfo: Identifiable, Codable, Hashable {
     let download_path: String?
     let added_on: Int
     let completion_on: Int
+    let tracker: String?
+    let trackers_count: Int?
 
     var id: String { hash }
 

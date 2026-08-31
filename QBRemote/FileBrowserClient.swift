@@ -117,6 +117,24 @@ class FileBrowserClient: ObservableObject {
         return req
     }
 
+    /// 删除 filebrowser 中的文件/目录（DELETE /api/resources/<相对路径>，需 X-Auth）
+    func deleteResource(relativePath: String) async throws {
+        guard let token = token else { throw FBError.invalidToken }
+        var rel = relativePath
+        if !rel.hasPrefix("/") { rel = "/" + rel }
+        guard let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: baseURL + "/api/resources" + encoded) else {
+            throw FBError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        req.setValue(token, forHTTPHeaderField: "X-Auth")
+        let (_, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
+            throw FBError.serverError(http.statusCode)
+        }
+    }
+
     /// Basic 认证头（用于 WebDAV 下载等）
     func basicAuthHeader(username: String, password: String) -> String? {
         let s = "\(username):\(password)"

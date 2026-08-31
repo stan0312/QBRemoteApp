@@ -1,0 +1,23 @@
+name: QBRemote
+options:
+  createIntermediateGroups: true
+targets:
+  QBRemote:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - QBRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.qbremote.app
+        INFOPLIST_FILE: QBRemote/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO

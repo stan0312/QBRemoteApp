@@ -1,0 +1,42 @@
+name: 编译 IPA
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 编译（无签名）
+        run: |
+          xcodebuild \
+            -project QBRemote.xcodeproj \
+            -scheme QBRemote \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: 打包 IPA
+        run: |
+          mkdir -p Payload
+          cp -R "build/Build/Products/Release-iphoneos/QBRemote.app" Payload/
+          zip -r QBRemote.ipa Payload
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: QBRemote-ipa
+          path: QBRemote.ipa

@@ -252,42 +252,54 @@ struct MediaItemView: View {
     }
 
     private func startNative(url: URL, isAudio: Bool) {
-        guard let token = fb.token else { return }
-        let headers = ["X-Auth": token]
-        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
-        let item = AVPlayerItem(asset: asset)
-        let p = AVPlayer(playerItem: item)
-        if isAudio {
-            audioPlayer = p
-        } else {
-            avPlayer = p
+        // 经本地代理（正确 MIME + Range），AVPlayer 才能稳定识别播放
+        registerProxy(url) { localURL in
+            let asset = AVURLAsset(url: localURL)
+            let item = AVPlayerItem(asset: asset)
+            let p = AVPlayer(playerItem: item)
+            DispatchQueue.main.async {
+                if isAudio {
+                    self.audioPlayer = p
+                } else {
+                    self.avPlayer = p
+                }
+                p.play()
+            }
         }
-        p.play()
     }
 
     private func startVLC(target: URL) {
-        guard let token = fb.token else { vlcError = true; return }
-        // 经本地代理去掉认证，VLC 才能访问
-        LocalProxyServer.shared.start()
-        retryRegister(target: target, token: token, attempt: 0)
-    }
-
-    private func retryRegister(target: URL, token: String, attempt: Int) {
-        if let local = LocalProxyServer.shared.register(targetURL: target, token: token) {
-            guard let url = URL(string: local) else { vlcError = true; return }
+        registerProxy(target) { localURL in
             let p = VLCMediaPlayer()
-            p.media = VLCMedia(url: url)
-            vlcPlayer = p
+            p.media = VLCMedia(url: localURL)
+            self.vlcPlayer = p
             // VLCPlayerView makeUIView 时会设 drawable 并 play
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                vlcReady = true
+                self.vlcReady = true
             }
+        }
+    }
+
+    /// 经本地代理注册文件，成功后回调本地 URL；代理未就绪时自动重试
+    private func registerProxy(_ target: URL, completion: @escaping (URL) -> Void) {
+        guard let token = fb.token else {
+            DispatchQueue.main.async { self.vlcError = true }
+            return
+        }
+        LocalProxyServer.shared.start()
+        retryRegister(target: target, token: token, attempt: 0, completion: completion)
+    }
+
+    private func retryRegister(target: URL, token: String, attempt: Int, completion: @escaping (URL) -> Void) {
+        if let local = LocalProxyServer.shared.register(targetURL: target, token: token),
+           let url = URL(string: local) {
+            completion(url)
         } else if attempt < 30 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                retryRegister(target: target, token: token, attempt: attempt + 1)
+                self.retryRegister(target: target, token: token, attempt: attempt + 1, completion: completion)
             }
         } else {
-            vlcError = true
+            DispatchQueue.main.async { self.vlcError = true }
         }
     }
 

@@ -56,9 +56,6 @@ struct TorrentListView: View {
     @State private var trackerFilter: String? = nil
     @State private var categoryFilter: String? = nil
     @State private var tagFilter: String? = nil
-    @State private var showCatSection = false
-    @State private var showTagSection = false
-    @State private var showTrackerSection = false
     @State private var totalDL: Int64 = 0
     @State private var totalUP: Int64 = 0
 
@@ -164,44 +161,23 @@ struct TorrentListView: View {
                         .padding(.vertical, 8)
                         .background(Color(.systemBackground))
 
-                        // 状态分类标签（固定展示）
+                        // 筛选条（横向一条，点开才展示选项）
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
-                                ForEach(StatusFilter.allCases, id: \.self) { f in
-                                    chip(text: f.rawValue, selected: statusFilter == f) {
-                                        statusFilter = f
-                                    }
+                                statusFilterMenu
+                                if !categoryList.isEmpty {
+                                    categoryFilterMenu
                                 }
+                                if !tagList.isEmpty {
+                                    tagFilterMenu
+                                }
+                                if !trackerDomains.isEmpty {
+                                    trackerFilterMenu
+                                }
+                                sortMenu
                             }
                             .padding(.horizontal)
                             .padding(.vertical, 6)
-                        }
-
-                        // 分类（可折叠）
-                        if !categoryList.isEmpty {
-                            filterSection(title: "分类",
-                                          isExpanded: $showCatSection,
-                                          chips: categoryList,
-                                          selected: $categoryFilter,
-                                          allText: "全部分类")
-                        }
-
-                        // 标签（可折叠）
-                        if !tagList.isEmpty {
-                            filterSection(title: "标签",
-                                          isExpanded: $showTagSection,
-                                          chips: tagList,
-                                          selected: $tagFilter,
-                                          allText: "全部标签")
-                        }
-
-                        // Tracker（可折叠）
-                        if !trackerDomains.isEmpty {
-                            filterSection(title: "Tracker",
-                                          isExpanded: $showTrackerSection,
-                                          chips: trackerDomains,
-                                          selected: $trackerFilter,
-                                          allText: "全部 Tracker")
                         }
 
                         Divider()
@@ -290,64 +266,114 @@ struct TorrentListView: View {
         }
     }
 
-    // MARK: - 分类标签
+    // MARK: - 筛选条（横向下拉）
 
-    /// 可折叠的筛选区块（标题行 + 可横向滑动的 chips）
-    @ViewBuilder
-    private func filterSection(title: String,
-                               isExpanded: Binding<Bool>,
-                               chips: [String],
-                               selected: Binding<String?>,
-                               allText: String) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    isExpanded.wrappedValue.toggle()
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .bold))
-                    Text(title)
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 5)
-            }
-            .buttonStyle(.plain)
-
-            if isExpanded.wrappedValue {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        chip(text: allText, selected: selected.wrappedValue == nil) {
-                            selected.wrappedValue = nil
-                        }
-                        ForEach(chips, id: \.self) { c in
-                            chip(text: c, selected: selected.wrappedValue == c) {
-                                selected.wrappedValue = c
-                            }
-                        }
-                    }
-                    .padding(.horizontal)
-                    .padding(.bottom, 6)
-                }
-            }
+    /// 状态下拉
+    private var statusFilterMenu: some View {
+        filterMenu(title: "状态",
+                   value: statusFilter == .all ? nil : statusFilter.rawValue,
+                   options: StatusFilter.allCases.map { $0.rawValue }) { opt in
+            statusFilter = opt.flatMap(StatusFilter.init(rawValue:)) ?? .all
         }
     }
 
-    private func chip(text: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text)
-                .font(.caption.weight(selected ? .bold : .regular))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
-                .background(selected ? Color.blue : Color(.systemGray6))
-                .foregroundColor(selected ? .white : .primary)
-                .cornerRadius(14)
-                .lineLimit(1)
+    /// 分类下拉
+    private var categoryFilterMenu: some View {
+        filterMenu(title: "分类",
+                   value: categoryFilter,
+                   options: categoryList) { opt in
+            categoryFilter = opt
         }
-        .buttonStyle(.plain)
+    }
+
+    /// 标签下拉
+    private var tagFilterMenu: some View {
+        filterMenu(title: "标签",
+                   value: tagFilter,
+                   options: tagList) { opt in
+            tagFilter = opt
+        }
+    }
+
+    /// Tracker 下拉
+    private var trackerFilterMenu: some View {
+        filterMenu(title: "Tracker",
+                   value: trackerFilter,
+                   options: trackerDomains) { opt in
+            trackerFilter = opt
+        }
+    }
+
+    /// 排序下拉
+    private var sortMenu: some View {
+        Menu {
+            ForEach(SortOption.allCases, id: \.self) { opt in
+                Button {
+                    sortOption = opt
+                } label: {
+                    if sortOption == opt {
+                        Label(opt.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(opt.rawValue)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text("排序: \(sortOption.rawValue)")
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color(.systemGray6))
+            .cornerRadius(14)
+        }
+    }
+
+    /// 通用下拉筛选按钮（当前值显示在按钮上，选中项打勾）
+    @ViewBuilder
+    private func filterMenu(title: String,
+                            value: String?,
+                            options: [String],
+                            onSelect: @escaping (String?) -> Void) -> some View {
+        Menu {
+            Button {
+                onSelect(nil)
+            } label: {
+                if value == nil {
+                    Label("全部", systemImage: "checkmark")
+                } else {
+                    Text("全部")
+                }
+            }
+            ForEach(options, id: \.self) { opt in
+                Button {
+                    onSelect(opt)
+                } label: {
+                    if value == opt {
+                        Label(opt, systemImage: "checkmark")
+                    } else {
+                        Text(opt)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text("\(title): \(value ?? "全部")")
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(value != nil ? Color.blue.opacity(0.15) : Color(.systemGray6))
+            .foregroundColor(value != nil ? .blue : .primary)
+            .cornerRadius(14)
+        }
     }
 
     private func formatSpeed(_ bytes: Int64) -> String {
@@ -497,6 +523,22 @@ struct TorrentRow: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
+
+            HStack {
+                Text("添加于 " + formatDate(torrent.added_on))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Spacer()
+                if !(torrent.category ?? "").isEmpty {
+                    Text(torrent.category!)
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Color.blue.opacity(0.12))
+                        .foregroundColor(.blue)
+                        .cornerRadius(4)
+                }
+            }
         }
         .padding(.vertical, 2)
     }
@@ -518,6 +560,13 @@ struct TorrentRow: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+
+    private func formatDate(_ ts: Int) -> String {
+        let d = Date(timeIntervalSince1970: TimeInterval(ts))
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: d)
     }
 
     private func formatSpeed(_ bytes: Int64) -> String {

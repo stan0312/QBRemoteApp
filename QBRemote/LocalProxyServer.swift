@@ -3,9 +3,10 @@ import Network
 
 /// 本地 HTTP 代理服务器
 ///
-/// 用途：VLC 无法给请求附加 X-Auth header，而 filebrowser 的文件流需要 X-Auth 认证。
-/// 本代理在 App 内起一个 127.0.0.1 的本地 HTTP 服务，把「带认证的 filebrowser 文件流」
-/// 转发成「无需认证的本地 URL」，供 VLC 播放 MKV 等格式。支持 Range（可拖动进度）。
+/// 用途：filebrowser 的文件流需要 X-Auth 认证，且返回的 Content-Type 是 application/octet-stream，
+/// 导致 AVPlayer / VLC 无法正确识别视频格式。本代理在 App 内起一个 127.0.0.1 的本地 HTTP 服务，
+/// 把「带认证的 filebrowser 文件流」转发成「无需认证 + 正确 MIME 的本地 URL」，
+/// 供 AVPlayer 和 VLC 播放。支持 Range（可拖动进度）。
 final class LocalProxyServer {
     static let shared = LocalProxyServer()
 
@@ -116,7 +117,7 @@ final class LocalProxyServer {
         if let range = range {
             req.setValue(range, forHTTPHeaderField: "Range")
         }
-        let forwarder = StreamForwarder(conn: conn)
+        let forwarder = StreamForwarder(conn: conn, queue: queue, contentType: Self.mimeType(for: target))
         activeForwarders.append(forwarder)
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 60
@@ -138,19 +139,52 @@ final class LocalProxyServer {
             conn.cancel()
         })
     }
+
+    /// 根据文件扩展名返回正确的 MIME（覆盖 filebrowser 返回的 application/octet-stream）
+    static func mimeType(for url: URL) -> String? {
+        switch url.pathExtension.lowercased() {
+        case "mp4", "m4v": return "video/mp4"
+        case "mov": return "video/quicktime"
+        case "mkv": return "video/x-matroska"
+        case "avi": return "video/x-msvideo"
+        case "wmv": return "video/x-ms-wmv"
+        case "flv": return "video/x-flv"
+        case "webm": return "video/webm"
+        case "ts": return "video/mp2t"
+        case "mpg", "mpeg": return "video/mpeg"
+        case "3gp": return "video/3gpp"
+        case "mp3": return "audio/mpeg"
+        case "wav": return "audio/wav"
+        case "flac": return "audio/flac"
+        case "aac": return "audio/aac"
+        case "ogg", "oga": return "audio/ogg"
+        case "m4a": return "audio/mp4"
+        case "wma": return "audio/x-ms-wma"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "png": return "image/png"
+        case "gif": return "image/gif"
+        case "webp": return "image/webp"
+        case "heic": return "image/heic"
+        default: return nil
+        }
+    }
 }
 
-/// 流式转发：把 URLSession 的数据流式写给 NWConnection
+/// 流式转发：把 URLSession 的数据流式写给 NWConnection（所有连接操作都在代理队列上执行）
 private final class StreamForwarder: NSObject, URLSessionDataDelegate {
     let conn: NWConnection
+    let queue: DispatchQueue
+    let overrideContentType: String?
     var task: URLSessionDataTask?
     var session: URLSession?
     var onComplete: (() -> Void)?
     private var sentHeader = false
     private var failed = false
 
-    init(conn: NWConnection) {
+    init(conn: NWConnection, queue: DispatchQueue, contentType: String?) {
         self.conn = conn
+        self.queue = queue
+        self.overrideContentType = contentType
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
@@ -161,35 +195,48 @@ private final class StreamForwarder: NSObject, URLSessionDataDelegate {
             completionHandler(.cancel)
             return
         }
-        // 转发响应头（保留 Range 需要的字段）
+        // 转发响应头（用映射的 MIME 覆盖 octet-stream，保留 Range 字段）
         var header = "HTTP/1.1 \(http.statusCode) X\r\n"
+        var hasLength = false
         for key in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag", "Content-Disposition"] {
             if let v = http.value(forHTTPHeaderField: key) {
+                if key == "Content-Type", let mime = overrideContentType, v == "application/octet-stream" {
+                    header += "Content-Type: \(mime)\r\n"
+                    continue
+                }
+                if key == "Content-Length" { hasLength = true }
                 header += "\(key): \(v)\r\n"
             }
         }
-        if http.value(forHTTPHeaderField: "Content-Length") == nil {
+        if !hasLength {
             header += "Transfer-Encoding: chunked\r\n"
         }
         header += "Connection: close\r\n\r\n"
-        conn.send(content: Data(header.utf8), completion: .contentProcessed { _ in })
+        let payload = Data(header.utf8)
+        queue.async { [weak self] in
+            self?.conn.send(content: payload, completion: .contentProcessed { _ in })
+        }
         sentHeader = true
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard !failed else { return }
-        conn.send(content: data, completion: .contentProcessed { [weak self] error in
-            if error != nil {
-                self?.failed = true
-                self?.task?.cancel()
-            }
-        })
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.conn.send(content: data, completion: .contentProcessed { [weak self] error in
+                if error != nil {
+                    self?.failed = true
+                    self?.task?.cancel()
+                }
+            })
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        // 结束后关闭本地连接
-        conn.cancel()
+        queue.async { [weak self] in
+            self?.conn.cancel()
+        }
         onComplete?()
     }
 }

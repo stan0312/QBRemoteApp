@@ -96,3 +96,58 @@ struct TorrentFile: Identifiable, Codable, Hashable {
         return "doc"
     }
 }
+
+// MARK: - 传输信息
+
+/// qB 全局传输信息（/api/v2/transfer/info），限速单位为 字节/秒
+struct TransferInfo: Codable {
+    let dl_info_speed: Int64?
+    let up_info_speed: Int64?
+    let dl_rate_limit: Int64?
+    let up_rate_limit: Int64?
+}
+
+// MARK: - 目录树节点
+
+/// 用于把扁平的文件列表构建成目录树（像 qB 原版"内容"标签一样）
+final class FileTreeNode: Identifiable, ObservableObject {
+    let id = UUID()
+    let name: String
+    let isDirectory: Bool
+    let file: TorrentFile?
+    @Published var children: [FileTreeNode] = []
+    @Published var isExpanded = false
+
+    init(name: String, isDirectory: Bool, file: TorrentFile? = nil) {
+        self.name = name
+        self.isDirectory = isDirectory
+        self.file = file
+    }
+
+    /// 由扁平文件列表构建目录树
+    static func buildTree(from files: [TorrentFile]) -> [FileTreeNode] {
+        let root = FileTreeNode(name: "", isDirectory: true)
+        for f in files {
+            let parts = f.name.split(separator: "/").map(String.init)
+            if parts.isEmpty { continue }
+            var node = root
+            for (i, part) in parts.enumerated() {
+                let isLast = (i == parts.count - 1)
+                if isLast {
+                    // 叶子：文件
+                    node.children.append(FileTreeNode(name: part, isDirectory: false, file: f))
+                } else {
+                    // 中间：目录（存在则复用，不存在则创建）
+                    if let existing = node.children.first(where: { $0.name == part && $0.isDirectory }) {
+                        node = existing
+                    } else {
+                        let dir = FileTreeNode(name: part, isDirectory: true)
+                        node.children.append(dir)
+                        node = dir
+                    }
+                }
+            }
+        }
+        return root.children
+    }
+}

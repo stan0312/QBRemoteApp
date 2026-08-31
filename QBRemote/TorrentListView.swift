@@ -8,6 +8,12 @@ struct TorrentListView: View {
     @State private var torrents: [TorrentInfo] = []
     @State private var isLoading = false
     @State private var errorText: String?
+    @State private var showAdd = false
+    @State private var showSpeedLimit = false
+    @State private var pendingDelete: TorrentInfo?
+    @State private var showDeleteDialog = false
+    @State private var opMessage: String?
+    @State private var showOpMessage = false
 
     var body: some View {
         NavigationView {
@@ -27,17 +33,26 @@ struct TorrentListView: View {
                             .buttonStyle(.borderedProminent)
                     }
                 } else if torrents.isEmpty {
-                    VStack(spacing: 8) {
+                    VStack(spacing: 12) {
                         Image(systemName: "tray")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
                         Text("暂无任务")
                             .foregroundColor(.secondary)
+                        Button {
+                            showAdd = true
+                        } label: {
+                            Label("添加任务", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
                 } else {
-                    List(torrents) { t in
-                        NavigationLink(destination: TorrentDetailView(qb: qb, fb: fb, settings: settings, torrent: t)) {
-                            TorrentRow(torrent: t)
+                    List {
+                        ForEach(torrents) { t in
+                            NavigationLink(destination: TorrentDetailView(qb: qb, fb: fb, settings: settings, torrent: t)) {
+                                TorrentRow(torrent: t)
+                            }
+                            .contextMenu { torrentMenu(t) }
                         }
                     }
                     .refreshable { await load() }
@@ -52,17 +67,118 @@ struct TorrentListView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    HStack(spacing: 18) {
+                        Button {
+                            showAdd = true
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        Menu {
+                            Button("暂停全部") { Task { await runOp("pause", hashes: ["all"]) } }
+                            Button("恢复全部") { Task { await runOp("resume", hashes: ["all"]) } }
+                            Divider()
+                            Button("限速设置") { showSpeedLimit = true }
+                        } label: {
+                            Image(systemName: "slider.horizontal.3")
+                        }
+                    }
+                }
             }
         }
         .navigationViewStyle(.stack)
+        .sheet(isPresented: $showAdd) {
+            AddTorrentView(qb: qb, settings: settings)
+        }
+        .sheet(isPresented: $showSpeedLimit) {
+            SpeedLimitView(qb: qb)
+        }
+        .confirmationDialog("删除任务", isPresented: $showDeleteDialog, presenting: pendingDelete) { t in
+            Button("删除任务并删除文件", role: .destructive) {
+                Task { await deleteTask(t, deleteFiles: true) }
+            }
+            Button("仅删除任务（保留文件）", role: .destructive) {
+                Task { await deleteTask(t, deleteFiles: false) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { t in
+            Text("「\(t.name)」")
+        }
+        .alert("提示", isPresented: $showOpMessage) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(opMessage ?? "")
+        }
         .task { await load() }
+    }
+
+    // MARK: - 单任务操作菜单
+
+    @ViewBuilder
+    private func torrentMenu(_ t: TorrentInfo) -> some View {
+        let isPaused = t.state.hasPrefix("paused") || t.state.hasPrefix("stopped") || t.state == "error" || t.state == "missingFiles"
+
+        if isPaused {
+            Button {
+                Task { await runOp("resume", hashes: [t.hash]) }
+            } label: {
+                Label("继续", systemImage: "play.fill")
+            }
+        } else {
+            Button {
+                Task { await runOp("pause", hashes: [t.hash]) }
+            } label: {
+                Label("暂停", systemImage: "pause.fill")
+            }
+        }
+
+        Button {
+            Task { await runOp("recheck", hashes: [t.hash]) }
+        } label: {
+            Label("重新校验", systemImage: "checkmark.circle")
+        }
+
+        Divider()
+
+        Button(role: .destructive) {
+            pendingDelete = t
+            showDeleteDialog = true
+        } label: {
+            Label("删除", systemImage: "trash")
+        }
+    }
+
+    // MARK: - 操作
+
+    private func runOp(_ action: String, hashes: [String]) async {
+        do {
+            switch action {
+            case "pause": try await qb.pause(hashes: hashes)
+            case "resume": try await qb.resume(hashes: hashes)
+            case "recheck": try await qb.recheck(hashes: hashes)
+            default: break
+            }
+            await load()
+        } catch {
+            opMessage = error.localizedDescription
+            showOpMessage = true
+        }
+    }
+
+    private func deleteTask(_ t: TorrentInfo, deleteFiles: Bool) async {
+        do {
+            try await qb.delete(hashes: [t.hash], deleteFiles: deleteFiles)
+            await load()
+        } catch {
+            opMessage = error.localizedDescription
+            showOpMessage = true
+        }
     }
 
     private func load() async {
         isLoading = true
         errorText = nil
         do {
-            // 确保已登录
             if !qb.isLoggedIn {
                 let ok = try await qb.login(username: settings.qbUsername,
                                             password: settings.qbPassword)
@@ -73,7 +189,6 @@ struct TorrentListView: View {
                 }
             }
             torrents = try await qb.fetchTorrents()
-            // 按添加时间倒序
             torrents.sort { $0.added_on > $1.added_on }
         } catch {
             errorText = error.localizedDescription
@@ -151,6 +266,91 @@ struct TorrentRow: View {
             return String(format: "%.0f KB/s", Double(bytes) / 1024)
         } else {
             return "\(bytes) B/s"
+        }
+    }
+}
+
+/// 全局限速设置
+struct SpeedLimitView: View {
+    @ObservedObject var qb: QBClient
+    @Environment(\.dismiss) private var dismiss
+    @State private var dlText = ""
+    @State private var upText = ""
+    @State private var loading = true
+    @State private var errorText: String?
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("全局限速（KB/s，填 0 表示不限速）")) {
+                    HStack {
+                        Text("下载")
+                        Spacer()
+                        TextField("不限速", text: $dlText)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 120)
+                    }
+                    HStack {
+                        Text("上传")
+                        Spacer()
+                        TextField("不限速", text: $upText)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 120)
+                    }
+                }
+                Section {
+                    Button {
+                        Task { await apply() }
+                    } label: {
+                        Text("应用限速")
+                            .frame(maxWidth: .infinity)
+                            .font(.headline.bold())
+                    }
+                }
+                if let errorText = errorText {
+                    Section {
+                        Text(errorText).foregroundColor(.red)
+                    }
+                }
+            }
+            .navigationTitle("限速设置")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+        .task { await load() }
+    }
+
+    private func load() async {
+        do {
+            let info = try await qb.fetchTransferInfo()
+            // transfer/info 返回的是字节/秒，转换为 KB/s
+            let dl = info.dl_rate_limit ?? 0
+            let up = info.up_rate_limit ?? 0
+            DispatchQueue.main.async {
+                dlText = dl > 0 ? "\(dl / 1024)" : "0"
+                upText = up > 0 ? "\(up / 1024)" : "0"
+                loading = false
+            }
+        } catch {
+            errorText = error.localizedDescription
+            loading = false
+        }
+    }
+
+    private func apply() async {
+        do {
+            let dl = Int(dlText) ?? 0
+            let up = Int(upText) ?? 0
+            try await qb.setGlobalDownloadLimit(kbPerSec: dl)
+            try await qb.setGlobalUploadLimit(kbPerSec: up)
+            dismiss()
+        } catch {
+            errorText = error.localizedDescription
         }
     }
 }

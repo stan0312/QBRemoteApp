@@ -87,6 +87,139 @@ class QBClient: ObservableObject {
             }
         }
     }
+
+    // MARK: - 任务操作
+
+    /// 暂停任务（hashes 为 "all" 表示全部）
+    func pause(hashes: [String]) async throws {
+        try await torrentAction(action: "pause", hashes: hashes)
+    }
+
+    /// 恢复任务
+    func resume(hashes: [String]) async throws {
+        try await torrentAction(action: "resume", hashes: hashes)
+    }
+
+    /// 重新校验
+    func recheck(hashes: [String]) async throws {
+        try await torrentAction(action: "recheck", hashes: hashes)
+    }
+
+    private func torrentAction(action: String, hashes: [String]) async throws {
+        var comps = URLComponents(string: baseURL + "/api/v2/torrents/" + action)!
+        comps.queryItems = [URLQueryItem(name: "hashes", value: hashes.isEmpty ? "all" : hashes.joined(separator: "|"))]
+        guard let url = comps.url else { throw QBError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let (_, resp) = try await session.data(for: req)
+        try checkAuth(resp)
+    }
+
+    /// 删除任务
+    func delete(hashes: [String], deleteFiles: Bool) async throws {
+        var comps = URLComponents(string: baseURL + "/api/v2/torrents/delete")!
+        comps.queryItems = [
+            URLQueryItem(name: "hashes", value: hashes.joined(separator: "|")),
+            URLQueryItem(name: "deleteFiles", value: deleteFiles ? "true" : "false")
+        ]
+        guard let url = comps.url else { throw QBError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let (_, resp) = try await session.data(for: req)
+        try checkAuth(resp)
+    }
+
+    // MARK: - 添加任务
+
+    /// 添加磁力链接/HTTP 种子（urls 用换行分隔，可多个）
+    func addTorrents(urls: String, savePath: String? = nil, paused: Bool = false) async throws {
+        guard var comps = URLComponents(string: baseURL + "/api/v2/torrents/add") else {
+            throw QBError.invalidURL
+        }
+        var items = [URLQueryItem]()
+        if !urls.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            items.append(URLQueryItem(name: "urls", value: urls))
+        }
+        if let savePath = savePath, !savePath.isEmpty {
+            items.append(URLQueryItem(name: "savepath", value: savePath))
+        }
+        if paused {
+            items.append(URLQueryItem(name: "paused", value: "true"))
+        }
+        comps.queryItems = items
+        guard let url = comps.url else { throw QBError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let (_, resp) = try await session.data(for: req)
+        try checkAuth(resp)
+    }
+
+    /// 上传 .torrent 文件添加任务
+    func uploadTorrentFile(fileData: Data, filename: String, savePath: String? = nil, paused: Bool = false) async throws {
+        guard let url = URL(string: baseURL + "/api/v2/torrents/add") else {
+            throw QBError.invalidURL
+        }
+        // 构造 multipart/form-data
+        let boundary = "----QBRemoteBoundary" + UUID().uuidString
+        var body = Data()
+        func appendField(name: String, value: String) {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(value)\r\n".data(using: .utf8)!)
+        }
+        if let savePath = savePath, !savePath.isEmpty {
+            appendField(name: "savepath", value: savePath)
+        }
+        if paused {
+            appendField(name: "paused", value: "true")
+        }
+        // 文件字段
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"torrents\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/x-bittorrent\r\n\r\n".data(using: .utf8)!)
+        body.append(fileData)
+        body.append("\r\n".data(using: .utf8)!)
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        let (_, resp) = try await session.data(for: req)
+        try checkAuth(resp)
+    }
+
+    // MARK: - 传输设置
+
+    /// 设置全局下载限速（KB/s，0 表示不限速）
+    func setGlobalDownloadLimit(kbPerSec: Int) async throws {
+        try await transferAction(action: "setDownloadLimit", value: kbPerSec)
+    }
+
+    /// 设置全局上传限速（KB/s，0 表示不限速）
+    func setGlobalUploadLimit(kbPerSec: Int) async throws {
+        try await transferAction(action: "setUploadLimit", value: kbPerSec)
+    }
+
+    /// 获取当前全局限速
+    func fetchTransferInfo() async throws -> TransferInfo {
+        guard let url = URL(string: baseURL + "/api/v2/transfer/info") else {
+            throw QBError.invalidURL
+        }
+        let (data, resp) = try await session.data(from: url)
+        try checkAuth(resp)
+        return try JSONDecoder().decode(TransferInfo.self, from: data)
+    }
+
+    private func transferAction(action: String, value: Int) async throws {
+        var comps = URLComponents(string: baseURL + "/api/v2/transfer/" + action)!
+        comps.queryItems = [URLQueryItem(name: "limit", value: "\(value)")]
+        guard let url = comps.url else { throw QBError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        let (_, resp) = try await session.data(for: req)
+        try checkAuth(resp)
+    }
 }
 
 enum QBError: LocalizedError {

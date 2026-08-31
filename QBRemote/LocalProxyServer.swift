@@ -222,12 +222,18 @@ private final class StreamForwarder: NSObject, URLSessionDataDelegate {
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard !failed else { return }
+        // 背压：暂停上游下载，等本地连接写完这块再恢复，避免大文件全量下载进内存导致卡顿/崩溃
+        dataTask.suspend()
         queue.async { [weak self] in
             guard let self = self else { return }
             self.conn.send(content: data, completion: .contentProcessed { [weak self] error in
-                if error != nil {
-                    self?.failed = true
-                    self?.task?.cancel()
+                self?.queue.async {
+                    if error != nil {
+                        self?.failed = true
+                        self?.task?.cancel()
+                    } else {
+                        self?.task?.resume()
+                    }
                 }
             })
         }

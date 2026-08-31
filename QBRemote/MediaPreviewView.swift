@@ -89,6 +89,7 @@ struct MediaItemView: View {
     @State private var vlcPlayer: VLCMediaPlayer?
     @State private var vlcReady = false
     @State private var vlcError = false
+    @State private var showFullScreen = false
 
     private var rawURL: URL? {
         fb.rawURL(savePath: torrent.save_path, relativeName: file.name, prefix: settings.pathPrefix)
@@ -104,8 +105,36 @@ struct MediaItemView: View {
             Color.black.ignoresSafeArea()
             content
         }
+        .overlay(alignment: .bottomTrailing) {
+            fullScreenButton
+        }
         .onAppear { start() }
         .onDisappear { stop() }
+        .fullScreenCover(isPresented: $showFullScreen) {
+            if isNativePlayable, let p = avPlayer {
+                NativeFullScreenPlayer(player: p)
+            } else if let p = vlcPlayer, vlcReady {
+                VLCFullScreenPlayer(player: p)
+            }
+        }
+    }
+
+    /// 视频全屏按钮（图片/音频不显示）
+    @ViewBuilder
+    private var fullScreenButton: some View {
+        if file.isVideo, (avPlayer != nil || vlcPlayer != nil) {
+            Button {
+                showFullScreen = true
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(10)
+                    .background(Color.black.opacity(0.5))
+                    .clipShape(Circle())
+            }
+            .padding(20)
+        }
     }
 
     @ViewBuilder
@@ -381,6 +410,185 @@ struct VLCPlayerView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+/// 原生视频全屏播放器：系统 AVPlayerViewController，自带全部播放器功能
+/// （进度、音量、倍速、画中画、横屏全屏等）
+struct NativeFullScreenPlayer: UIViewControllerRepresentable {
+    let player: AVPlayer
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let vc = AVPlayerViewController()
+        vc.player = player
+        vc.showsPlaybackControls = true
+        vc.allowsPictureInPicturePlayback = true
+        vc.canStartPictureInPictureAutomaticallyFromInline = false
+        vc.entersFullScreenWhenPlaybackBegins = false
+        player.play()
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {}
+}
+
+/// MKV 等非原生视频全屏播放器：VLC + 自定义控制条
+/// （播放/暂停、进度拖动、倍速、退出全屏）
+struct VLCFullScreenPlayer: View {
+    let player: VLCMediaPlayer
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var position: Double = 0
+    @State private var curText = "00:00:00"
+    @State private var durText = "00:00:00"
+    @State private var isPlaying = false
+    @State private var rate: Float = 1.0
+    @State private var seeking = false
+    @State private var timer: Timer?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VLCPlayerView(player: player)
+                .ignoresSafeArea()
+
+            // 控制层
+            VStack {
+                HStack {
+                    Text("全屏播放")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.white)
+                    Spacer()
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+                Spacer()
+
+                // 底部控制条
+                VStack(spacing: 10) {
+                    Slider(value: $position, in: 0...1) { editing in
+                        if editing {
+                            seeking = true
+                        } else {
+                            player.position = Float(position)
+                            seeking = false
+                            if isPlaying { player.play() }
+                        }
+                    }
+                    .tint(.white)
+
+                    HStack {
+                        Text(curText)
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.85))
+                        Spacer()
+                        Text(durText)
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.85))
+                    }
+
+                    HStack(spacing: 40) {
+                        // 倍速
+                        Menu {
+                            ForEach([0.5, 1.0, 1.25, 1.5, 2.0], id: \.self) { r in
+                                Button {
+                                    rate = Float(r)
+                                    player.rate = Float(r)
+                                } label: {
+                                    if rate == Float(r) {
+                                        Label("\(formatRate(r))x", systemImage: "checkmark")
+                                    } else {
+                                        Text("\(formatRate(r))x")
+                                    }
+                                }
+                            }
+                        } label: {
+                            Text("\(formatRate(rate))x")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .background(Color.white.opacity(0.2))
+                                .cornerRadius(8)
+                        }
+
+                        // 播放/暂停
+                        Button {
+                            if player.isPlaying {
+                                player.pause()
+                                isPlaying = false
+                            } else {
+                                player.play()
+                                isPlaying = true
+                            }
+                        } label: {
+                            Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                                .font(.system(size: 54))
+                                .foregroundColor(.white)
+                        }
+
+                        // 退出全屏
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "arrow.down.right.and.arrow.up.left")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 7)
+                                .background(Color.white.opacity(0.2))
+                                .cornerRadius(8)
+                        }
+                    }
+                    .foregroundColor(.white)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 18)
+                .background(LinearGradient(colors: [.clear, .black.opacity(0.85)],
+                                           startPoint: .top, endPoint: .bottom))
+            }
+        }
+        .onAppear {
+            player.play()
+            isPlaying = true
+            startTimer()
+        }
+        .onDisappear {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    private func startTimer() {
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            if !seeking {
+                position = Double(player.position)
+            }
+            let cur = player.time?.intValue ?? 0
+            let len = player.length?.intValue ?? 0
+            curText = formatTime(Int(cur / 1000))
+            if len > 0 {
+                durText = formatTime(Int(len / 1000))
+            }
+            isPlaying = player.isPlaying
+        }
+    }
+
+    private func formatTime(_ s: Int) -> String {
+        String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+    }
+
+    private func formatRate(_ r: Float) -> String {
+        r == Float(Int(r)) ? "\(Int(r))" : String(format: "%.2g", r)
+    }
 }
 
 /// 系统分享面板（保存到文件 / 分享给第三方）

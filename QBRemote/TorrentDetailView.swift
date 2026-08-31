@@ -1,5 +1,24 @@
 import SwiftUI
 
+/// 内容页文件类型筛选（图片 / 视频分开）
+enum ContentTypeFilter: String, CaseIterable, Identifiable {
+    case all = "全部"
+    case image = "图片"
+    case video = "视频"
+    case audio = "音频"
+
+    var id: String { rawValue }
+
+    func matches(_ f: TorrentFile) -> Bool {
+        switch self {
+        case .all: return true
+        case .image: return f.isImage
+        case .video: return f.isVideo
+        case .audio: return f.isAudio
+        }
+    }
+}
+
 /// 任务详情：按目录树显示文件 + 预览 + 勾选下载/不下载
 struct TorrentDetailView: View {
     @ObservedObject var qb: QBClient
@@ -19,6 +38,12 @@ struct TorrentDetailView: View {
     @State private var showOpMessage = false
     @State private var pendingDeleteFile: TorrentFile?
     @State private var showDeleteFileDialog = false
+    @State private var contentType: ContentTypeFilter = .all
+
+    /// 当前显示的文件（按类型筛选）
+    private var displayFiles: [TorrentFile] {
+        contentType == .all ? files : files.filter { contentType.matches($0) }
+    }
 
     var body: some View {
         Group {
@@ -40,39 +65,52 @@ struct TorrentDetailView: View {
                 Text("该任务没有文件")
                     .foregroundColor(.secondary)
             } else {
-                List {
-                    // 目录操作行
-                    HStack {
-                        Button {
-                            toggleAll()
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: allExpanded ? "arrow.up.right.square" : "arrow.down.right.square")
-                                Text(allExpanded ? "全部折叠" : "全部展开")
-                                    .font(.caption.weight(.medium))
-                            }
-                            .foregroundColor(.blue)
+                VStack(spacing: 0) {
+                    // 类型分段：图片 / 视频 分开
+                    Picker("类型", selection: $contentType) {
+                        ForEach(ContentTypeFilter.allCases) { t in
+                            Text(t.rawValue).tag(t)
                         }
-                        Spacer()
-                        Text("\(files.count) 个文件 · 勾选=下载")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
                     }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal)
+                    .padding(.vertical, 6)
 
-                    ForEach(treeNodes) { node in
-                        FileTreeNodeView(node: node,
-                                         onToggleFile: { file in toggleFile(file) },
-                                         onToggleFolder: { n in toggleFolder(n) },
-                                         onPreview: { file in handleTap(file) },
-                                         onDeleteFile: { file in pendingDeleteFile = file; showDeleteFileDialog = true })
+                    List {
+                        // 目录操作行
+                        HStack {
+                            Button {
+                                toggleAll()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: allExpanded ? "arrow.up.right.square" : "arrow.down.right.square")
+                                    Text(allExpanded ? "全部折叠" : "全部展开")
+                                        .font(.caption.weight(.medium))
+                                }
+                                .foregroundColor(.blue)
+                            }
+                            Spacer()
+                            Text("\(displayFiles.count) 个文件 · 勾选=下载")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        ForEach(treeNodes) { node in
+                            FileTreeNodeView(node: node,
+                                             onToggleFile: { file in toggleFile(file) },
+                                             onToggleFolder: { n in toggleFolder(n) },
+                                             onPreview: { file in handleTap(file) },
+                                             onDeleteFile: { file in pendingDeleteFile = file; showDeleteFileDialog = true })
+                        }
                     }
+                    .refreshable { await load() }
                 }
-                .refreshable { await load() }
             }
         }
         .navigationTitle(torrent.name)
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
+        .onChange(of: contentType) { _ in rebuildTree() }
         .fullScreenCover(isPresented: $showPreview) {
             if !previewFiles.isEmpty {
                 MediaPreviewView(fb: fb, settings: settings, torrent: torrent,
@@ -105,16 +143,21 @@ struct TorrentDetailView: View {
                                        password: settings.qbPassword)
             }
             files = try await qb.fetchFiles(hash: torrent.hash)
-            let tree = FileTreeNode.buildTree(from: files)
-            if tree.count <= 10 {
-                setAll(tree, expanded: true)
-                allExpanded = true
-            }
-            treeNodes = tree
+            rebuildTree()
         } catch {
             errorText = error.localizedDescription
         }
         isLoading = false
+    }
+
+    /// 按当前类型筛选重建目录树
+    private func rebuildTree() {
+        let tree = FileTreeNode.buildTree(from: displayFiles)
+        if tree.count <= 10 {
+            setAll(tree, expanded: true)
+            allExpanded = true
+        }
+        treeNodes = tree
     }
 
     // MARK: - 展开/折叠
@@ -166,9 +209,9 @@ struct TorrentDetailView: View {
             showOpMessage = true
             return
         }
-        // 收集与当前文件同目录的可预览文件，支持左右滑动依次预览
+        // 收集与当前文件同目录的可预览文件，支持左右滑动依次预览（按当前类型筛选的列表）
         let dir = (file.name as NSString).deletingLastPathComponent
-        let siblings = files.filter {
+        let siblings = displayFiles.filter {
             $0.isPreviewable && ($0.name as NSString).deletingLastPathComponent == dir
         }.sorted { $0.index < $1.index }
         guard !siblings.isEmpty else { return }

@@ -54,8 +54,30 @@ struct TorrentListView: View {
     @State private var sortOption: SortOption = .addDesc
     @State private var statusFilter: StatusFilter = .all
     @State private var trackerFilter: String? = nil
+    @State private var categoryFilter: String? = nil
+    @State private var tagFilter: String? = nil
+    @State private var showCatSection = false
+    @State private var showTagSection = false
+    @State private var showTrackerSection = false
     @State private var totalDL: Int64 = 0
     @State private var totalUP: Int64 = 0
+
+    /// 所有任务中出现过的分类
+    private var categoryList: [String] {
+        Set(torrents.compactMap { $0.category }.filter { !$0.isEmpty }).sorted()
+    }
+
+    /// 所有任务中出现过的标签
+    private var tagList: [String] {
+        var set = Set<String>()
+        for t in torrents {
+            for tag in (t.tags ?? "").split(separator: ",") {
+                let s = tag.trimmingCharacters(in: .whitespaces)
+                if !s.isEmpty { set.insert(s) }
+            }
+        }
+        return set.sorted()
+    }
 
     /// 所有任务中出现过的 Tracker 域名
     private var trackerDomains: [String] {
@@ -72,10 +94,14 @@ struct TorrentListView: View {
         return host
     }
 
-    /// 按状态 + Tracker 筛选，再按排序方式排序
+    /// 按状态 + 分类 + 标签 + Tracker 筛选，再按排序方式排序
     private var filteredTorrents: [TorrentInfo] {
         let list = torrents.filter { t in
-            statusFilter.matches(t) && (trackerFilter == nil || trackerDomain(t.tracker) == trackerFilter)
+            statusFilter.matches(t)
+                && (trackerFilter == nil || trackerDomain(t.tracker) == trackerFilter)
+                && (categoryFilter == nil || (t.category ?? "") == categoryFilter)
+                && (tagFilter == nil || (t.tags ?? "").split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }.contains(tagFilter!))
         }
         switch sortOption {
         case .addDesc: return list.sorted { $0.added_on > $1.added_on }
@@ -138,7 +164,7 @@ struct TorrentListView: View {
                         .padding(.vertical, 8)
                         .background(Color(.systemBackground))
 
-                        // 状态分类标签
+                        // 状态分类标签（固定展示）
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 ForEach(StatusFilter.allCases, id: \.self) { f in
@@ -151,22 +177,31 @@ struct TorrentListView: View {
                             .padding(.vertical, 6)
                         }
 
-                        // Tracker 分类标签
+                        // 分类（可折叠）
+                        if !categoryList.isEmpty {
+                            filterSection(title: "分类",
+                                          isExpanded: $showCatSection,
+                                          chips: categoryList,
+                                          selected: $categoryFilter,
+                                          allText: "全部分类")
+                        }
+
+                        // 标签（可折叠）
+                        if !tagList.isEmpty {
+                            filterSection(title: "标签",
+                                          isExpanded: $showTagSection,
+                                          chips: tagList,
+                                          selected: $tagFilter,
+                                          allText: "全部标签")
+                        }
+
+                        // Tracker（可折叠）
                         if !trackerDomains.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    chip(text: "全部 Tracker", selected: trackerFilter == nil) {
-                                        trackerFilter = nil
-                                    }
-                                    ForEach(trackerDomains, id: \.self) { d in
-                                        chip(text: d, selected: trackerFilter == d) {
-                                            trackerFilter = d
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal)
-                                .padding(.vertical, 6)
-                            }
+                            filterSection(title: "Tracker",
+                                          isExpanded: $showTrackerSection,
+                                          chips: trackerDomains,
+                                          selected: $trackerFilter,
+                                          allText: "全部 Tracker")
                         }
 
                         Divider()
@@ -184,7 +219,8 @@ struct TorrentListView: View {
                     }
                 }
             }
-            .navigationTitle("下载任务")
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
@@ -255,6 +291,50 @@ struct TorrentListView: View {
     }
 
     // MARK: - 分类标签
+
+    /// 可折叠的筛选区块（标题行 + 可横向滑动的 chips）
+    @ViewBuilder
+    private func filterSection(title: String,
+                               isExpanded: Binding<Bool>,
+                               chips: [String],
+                               selected: Binding<String?>,
+                               allText: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isExpanded.wrappedValue.toggle()
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 5)
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded.wrappedValue {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        chip(text: allText, selected: selected.wrappedValue == nil) {
+                            selected.wrappedValue = nil
+                        }
+                        ForEach(chips, id: \.self) { c in
+                            chip(text: c, selected: selected.wrappedValue == c) {
+                                selected.wrappedValue = c
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 6)
+                }
+            }
+        }
+    }
 
     private func chip(text: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {

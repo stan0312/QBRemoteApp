@@ -11,7 +11,9 @@ struct TorrentDetailView: View {
     @State private var treeNodes: [FileTreeNode] = []
     @State private var isLoading = false
     @State private var errorText: String?
-    @State private var previewingFile: TorrentFile?
+    @State private var previewFiles: [TorrentFile] = []
+    @State private var previewIndex = 0
+    @State private var showPreview = false
     @State private var allExpanded = false
     @State private var opMessage: String?
     @State private var showOpMessage = false
@@ -71,8 +73,11 @@ struct TorrentDetailView: View {
         .navigationTitle(torrent.name)
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
-        .fullScreenCover(item: $previewingFile) { file in
-            MediaPreviewView(fb: fb, settings: settings, file: file, torrent: torrent)
+        .fullScreenCover(isPresented: $showPreview) {
+            if !previewFiles.isEmpty {
+                MediaPreviewView(fb: fb, settings: settings, torrent: torrent,
+                                 files: previewFiles, currentIndex: $previewIndex)
+            }
         }
         .alert("提示", isPresented: $showOpMessage) {
             Button("好", role: .cancel) {}
@@ -161,7 +166,15 @@ struct TorrentDetailView: View {
             showOpMessage = true
             return
         }
-        previewingFile = file
+        // 收集与当前文件同目录的可预览文件，支持左右滑动依次预览
+        let dir = (file.name as NSString).deletingLastPathComponent
+        let siblings = files.filter {
+            $0.isPreviewable && ($0.name as NSString).deletingLastPathComponent == dir
+        }.sorted { $0.index < $1.index }
+        guard !siblings.isEmpty else { return }
+        previewFiles = siblings
+        previewIndex = siblings.firstIndex(where: { $0.index == file.index }) ?? 0
+        showPreview = true
     }
 
     // MARK: - 删除文件

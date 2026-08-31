@@ -1,6 +1,10 @@
 name: QBRemote
 options:
   createIntermediateGroups: true
+packages:
+  MobileVLCKit:
+    url: https://github.com/showbie/MobileVLCKit-SPM
+    from: 3.7.3
 targets:
   QBRemote:
     type: application
@@ -8,6 +12,8 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - QBRemote
+    dependencies:
+      - package: MobileVLCKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.qbremote.app

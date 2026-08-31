@@ -504,9 +504,9 @@ struct VLCFullScreenPlayer: View {
                                     player.rate = Float(r)
                                 } label: {
                                     if rate == Float(r) {
-                                        Label("\(formatRate(r))x", systemImage: "checkmark")
+                                        Label("\(formatRate(Float(r)))x", systemImage: "checkmark")
                                     } else {
-                                        Text("\(formatRate(r))x")
+                                        Text("\(formatRate(Float(r)))x")
                                     }
                                 }
                             }
@@ -572,8 +572,8 @@ struct VLCFullScreenPlayer: View {
             if !seeking {
                 position = Double(player.position)
             }
-            let cur = player.time?.intValue ?? 0
-            let len = player.length?.intValue ?? 0
+            let cur = player.time.intValue
+            let len = player.length.intValue
             curText = formatTime(Int(cur / 1000))
             if len > 0 {
                 durText = formatTime(Int(len / 1000))

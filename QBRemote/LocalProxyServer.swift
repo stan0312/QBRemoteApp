@@ -68,7 +68,7 @@ final class LocalProxyServer {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self = self else { return }
             if let data = data, !data.isEmpty {
-                var buf = buffer + data
+                let buf = buffer + data
                 if let range = buf.range(of: Data("\r\n\r\n".utf8)) {
                     let head = String(data: buf[..<range.lowerBound], encoding: .utf8) ?? ""
                     let body = Data(buf[range.upperBound...])

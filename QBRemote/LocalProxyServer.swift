@@ -1,15 +1,18 @@
 import Foundation
 import Network
 
-/// 本地 HTTP 代理服务器（多连接分段加速版）
+/// 本地 HTTP 代理服务器（多连接分段 + 流式加速版）
 ///
 /// 用途：filebrowser 的文件流需要 X-Auth 认证，且返回的 Content-Type 是 application/octet-stream，
 /// 导致 AVPlayer / VLC 无法正确识别视频格式。本代理在 App 内起一个 127.0.0.1 的本地 HTTP 服务，
 /// 把「带认证的 filebrowser 文件流」转发成「无需认证 + 正确 MIME 的本地 URL」。
 ///
-/// 加速原理：运营商的限速通常是「按单条 TCP 连接」级的。播放器请求本地代理时，代理把文件按
+/// 加速原理：运营商/链路的限速通常是「按单条 TCP 连接」级的。播放器请求本地代理时，代理把文件按
 /// 字节切成若干段（每段 4MB），用多条并发连接各自带 Range 请求从 filebrowser 拉取，再按段序号
-/// 顺序喂给播放器 —— 多条连接各自叠加带宽，绕过单连接限速，总吞吐 ≈ 并发数 × 单连接限速。
+/// 顺序喂给播放器 —— 多条连接各自叠加带宽，绕过单连接限速。
+///
+/// 流式要点：响应头在第一个分段返回时立即转发、分段的数据块到达即按序转发（不等待整段下载完），
+/// 保证首屏快速出画面，同时后台持续用多连接预取。
 final class LocalProxyServer {
     static let shared = LocalProxyServer()
 
@@ -173,7 +176,7 @@ final class LocalProxyServer {
     }
 }
 
-/// 多连接分段下载引擎：把一个 Range 切成多段并发拉取，按序输出给本地连接
+/// 多连接分段下载引擎：把一个 Range 切成多段并发拉取，数据块按序流式输出给本地连接
 private final class MultiSegmentDownloader: NSObject {
     let conn: NWConnection
     let queue: DispatchQueue
@@ -184,22 +187,22 @@ private final class MultiSegmentDownloader: NSObject {
     let contentType: String?
     var onComplete: (() -> Void)?
 
-    /// 每段大小与并发数（4 × 4MB ≈ 16MB 缓冲上限，兼顾速度与内存）
-    private static let SEG_SIZE: Int64 = 4 * 1024 * 1024
-    private static let CONCURRENCY = 4
+    /// 每段大小与并发数（6 × 2MB ≈ 12MB 缓冲上限，兼顾速度与内存）
+    private static let SEG_SIZE: Int64 = 2 * 1024 * 1024
+    private static let CONCURRENCY = 6
 
     private var nextStart: Int64
     private var nextSeq = 0
-    private var nextToSend = 0
+    /// 当前正在转发给播放器的段序号
+    private var currentSeq = 0
     private var activeCount = 0
     private var endReached = false
     private var failed = false
-    private var failed416 = false
     private var headerPrepared = false
     private var headerSent = false
     private var responseHeader: String?
-    /// seq -> 已下载完成的段数据（顺序输出）
-    private var readyData: [Int: Data] = [:]
+    /// 还没轮到转发的段的数据缓冲（seq -> 已到达的数据块）
+    private var pendingData: [Int: Data] = [:]
     /// 强持有正在下载的段（URLSession delegate 是弱引用）
     private var activeSegments: [Int: SegmentDownloader] = [:]
 
@@ -219,7 +222,6 @@ private final class MultiSegmentDownloader: NSObject {
         queue.async { [weak self] in
             guard let self = self else { return }
             self.launchUpTo()
-            self.pump()
         }
     }
 
@@ -253,37 +255,73 @@ private final class MultiSegmentDownloader: NSObject {
         dl.start()
     }
 
-    // MARK: - 段完成回调（在 queue 上）
+    // MARK: - 段回调（均在 queue 上执行）
 
-    func segmentDone(seq: Int, data: Data, status: Int, totalSize: Int64?, isShort: Bool) {
-        activeSegments.removeValue(forKey: seq)
-        activeCount -= 1
-        if failed { return }
-
+    /// 段响应头到达：第一时间构造并发送响应头（不等待数据）
+    func onSegmentHeader(seq: Int, status: Int, totalSize: Int64?) {
+        if failed || headerSent { return }
         if status == 416 {
-            endReached = true
-            if !headerPrepared {
-                prepareHeader416()
-            }
+            prepareHeader416()
         } else if status == 206 || status == 200 {
-            if !headerPrepared {
-                prepareHeader(totalSize: totalSize)
-            }
-            if !failed416 {
-                readyData[seq] = data
-            }
-            if isShort {
-                endReached = true
-            }
+            prepareHeader(totalSize: totalSize)
         } else {
             failAndCleanup()
             return
         }
+        sendData(Data(responseHeader!.utf8))
+        headerSent = true
+        if failed416 {
+            checkFinish()
+        }
+    }
 
+    /// 段数据块到达：当前段直接转发，后续段缓冲
+    func onSegmentData(seq: Int, block: Data) {
+        if failed { return }
+        if seq < currentSeq { return }
+        if seq == currentSeq {
+            sendData(block)
+        } else {
+            if pendingData[seq] == nil { pendingData[seq] = Data() }
+            pendingData[seq]?.append(block)
+        }
+    }
+
+    /// 段下载完成
+    func onSegmentDone(seq: Int, isShort: Bool) {
+        activeSegments.removeValue(forKey: seq)
+        activeCount -= 1
+        if failed { return }
+        if isShort {
+            endReached = true
+        }
+        if seq == currentSeq {
+            advanceAfterDone()
+        }
         if !endReached {
             launchUpTo()
         }
-        pump()
+        checkFinish()
+    }
+
+    /// 当前段结束后，切换到下一个段并发出其已缓冲的数据
+    private func advanceAfterDone() {
+        while true {
+            let next = currentSeq + 1
+            if next >= nextSeq {
+                currentSeq = nextSeq
+                break
+            }
+            currentSeq = next
+            if let buf = pendingData.removeValue(forKey: next), !buf.isEmpty {
+                sendData(buf)
+            }
+            if activeSegments[next] != nil {
+                // 下一段仍在下载：其后续数据块会直接转发
+                break
+            }
+            // 下一段已结束：继续推进
+        }
     }
 
     // MARK: - 响应头
@@ -319,52 +357,23 @@ private final class MultiSegmentDownloader: NSObject {
         endReached = true
     }
 
-    // MARK: - 顺序输出
+    // MARK: - 输出与结束
 
-    private func pump() {
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            if self.failed { return }
-
-            // 先发响应头
-            if let header = self.responseHeader, !self.headerSent {
-                self.headerSent = true
-                self.conn.send(content: Data(header.utf8), completion: .contentProcessed { [weak self] _ in
-                    self?.queue.async {
-                        if self?.failed416 == true {
-                            self?.finish()
-                        } else {
-                            self?.pump()
-                        }
-                    }
-                })
-                return
+    private func sendData(_ data: Data) {
+        guard !data.isEmpty else { return }
+        conn.send(content: data, completion: .contentProcessed { [weak self] error in
+            self?.queue.async {
+                if error != nil {
+                    self?.failAndCleanup()
+                }
             }
-
-            // 按段序号顺序发送
-            if let data = self.readyData.removeValue(forKey: self.nextToSend) {
-                self.nextToSend += 1
-                self.conn.send(content: data, completion: .contentProcessed { [weak self] error in
-                    self?.queue.async {
-                        if error != nil {
-                            self?.failAndCleanup()
-                        } else {
-                            self?.pump()
-                        }
-                    }
-                })
-                return
-            }
-
-            // 无就绪段：全部完成则结束，否则等后续段完成再触发
-            if self.isDone() {
-                self.finish()
-            }
-        }
+        })
     }
 
-    private func isDone() -> Bool {
-        endReached && nextToSend >= nextSeq && activeCount == 0
+    private func checkFinish() {
+        if endReached && currentSeq >= nextSeq && activeCount == 0 {
+            finish()
+        }
     }
 
     private func finish() {
@@ -379,14 +388,14 @@ private final class MultiSegmentDownloader: NSObject {
             dl.cancel()
         }
         activeSegments.removeAll()
-        readyData.removeAll()
+        pendingData.removeAll()
         conn.cancel()
         onComplete?()
         onComplete = nil
     }
 }
 
-/// 单个段的下载器：请求一个 Range，把数据完整缓冲到内存
+/// 单个段的下载器：请求一个 Range，把数据块实时回调给引擎
 private final class SegmentDownloader: NSObject, URLSessionDataDelegate {
     let seq: Int
     let segStart: Int64
@@ -396,9 +405,9 @@ private final class SegmentDownloader: NSObject, URLSessionDataDelegate {
     let target: URL
     var session: URLSession?
     var task: URLSessionDataTask?
-    private var data = Data()
     private var statusCode = 0
     private var totalSize: Int64?
+    private var received = 0
 
     init(seq: Int, segStart: Int64, segEnd: Int64, owner: MultiSegmentDownloader,
          token: String, target: URL) {
@@ -442,23 +451,31 @@ private final class SegmentDownloader: NSObject, URLSessionDataDelegate {
                 totalSize = tot
             }
         }
+        let status = statusCode
+        let total = totalSize
+        owner?.queue.async { [weak self] in
+            guard let self = self else { return }
+            self.owner?.onSegmentHeader(seq: self.seq, status: status, totalSize: total)
+        }
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        self.data.append(data)
+        received += data.count
+        let seq = self.seq
+        owner?.queue.async { [weak self] in
+            guard let self = self else { return }
+            self.owner?.onSegmentData(seq: seq, block: data)
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        let d = data
-        let status = statusCode
-        let total = totalSize
         let reqLen = segEnd - segStart + 1
-        let isShort = Int64(d.count) < reqLen
-        // 闭包强持有 self，保证本段完成清理执行完
-        owner?.queue.async {
-            self.owner?.segmentDone(seq: self.seq, data: d, status: status,
-                                    totalSize: total, isShort: isShort)
+        let isShort = Int64(received) < reqLen
+        let seq = self.seq
+        owner?.queue.async { [weak self] in
+            guard let self = self else { return }
+            self.owner?.onSegmentDone(seq: seq, isShort: isShort)
             self.session?.invalidateAndCancel()
             self.session = nil
         }

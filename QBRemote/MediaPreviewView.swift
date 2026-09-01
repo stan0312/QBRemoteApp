@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import AVFoundation
+import ImageIO
 import MobileVLCKit
 
 /// 媒体预览：同级目录左右滑动切换，逐个预览
@@ -351,13 +352,41 @@ struct MediaItemView: View {
         req.setValue(token, forHTTPHeaderField: "X-Auth")
         URLSession.shared.dataTask(with: req) { data, _, _ in
             DispatchQueue.main.async {
-                if let data = data, let img = UIImage(data: data) {
-                    self.image = img
+                if let data = data {
+                    if self.file.fileExtension == "gif", let gif = Self.animatedImage(from: data) {
+                        self.image = gif
+                    } else if let img = UIImage(data: data) {
+                        self.image = img
+                    } else {
+                        self.imageError = true
+                    }
                 } else {
                     self.imageError = true
                 }
             }
         }.resume()
+    }
+
+    /// GIF 动图解码（ImageIO 逐帧合成动画 UIImage）
+    private static func animatedImage(from data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let count = CGImageSourceGetCount(source)
+        guard count > 1 else { return nil }
+        var images: [UIImage] = []
+        var duration = 0.0
+        for i in 0..<count {
+            if let cg = CGImageSourceCreateImageAtIndex(source, i, nil) {
+                images.append(UIImage(cgImage: cg))
+            }
+            if let props = CGImageSourceCopyPropertiesAtIndex(source, i, nil) as? [CFString: Any],
+               let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any],
+               let d = gif[kCGImagePropertyGIFDelayTime] as? Double {
+                duration += d
+            } else {
+                duration += 0.1
+            }
+        }
+        return UIImage.animatedImage(with: images, duration: max(duration, 0.01))
     }
 
     private func downloadAndSave() {

@@ -35,6 +35,21 @@ struct SettingsView: View {
                         .autocapitalization(.none)
                 }
 
+                Section(header: Text("局域网地址（可选，绕开公网限速）"),
+                        footer: Text("在家里 WiFi 下（手机与 NAS 同一局域网）打开此开关并填写内网 IP，App 将走局域网直连，不受外网 DDNS 链路的限速影响，播放更流畅。在外网时请关闭。")) {
+                    Toggle("使用局域网地址", isOn: $settings.useLAN)
+                    if settings.useLAN {
+                        TextField("qB 内网地址（如 http://192.168.1.5:8085）", text: $settings.qbLANURL)
+                            .keyboardType(.URL)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        TextField("FileBrowser 内网地址（如 http://192.168.1.5:8033）", text: $settings.fbLANURL)
+                            .keyboardType(.URL)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                    }
+                }
+
                 Section {
                     Button(action: {
                         settings.save()

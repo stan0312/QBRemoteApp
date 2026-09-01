@@ -67,8 +67,8 @@ struct RootView: View {
         connectError = nil
         isConnecting = true
 
-        qb.updateBaseURL(settings.normalized(settings.qbURL))
-        fb.updateBaseURL(settings.normalized(settings.fbURL))
+        qb.updateBaseURL(settings.activeQBURL)
+        fb.updateBaseURL(settings.activeFBURL)
 
         Task {
             do {

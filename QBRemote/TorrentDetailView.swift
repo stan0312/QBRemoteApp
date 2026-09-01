@@ -77,7 +77,7 @@ struct TorrentDetailView: View {
                     .padding(.vertical, 6)
 
                     List {
-                        // 目录操作行
+                        // 目录操作行：展开/折叠 + 全选/全不选
                         HStack {
                             Button {
                                 toggleAll()
@@ -88,6 +88,17 @@ struct TorrentDetailView: View {
                                         .font(.caption.weight(.medium))
                                 }
                                 .foregroundColor(.blue)
+                            }
+                            Spacer()
+                            Button {
+                                selectAllFiles()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: allSelected ? "checkmark.circle.fill" : "checkmark.circle")
+                                    Text(allSelected ? "全不选" : "全选下载")
+                                        .font(.caption.weight(.medium))
+                                }
+                                .foregroundColor(.green)
                             }
                             Spacer()
                             Text("\(displayFiles.count) 个文件 · 勾选=下载")
@@ -150,9 +161,10 @@ struct TorrentDetailView: View {
         isLoading = false
     }
 
-    /// 按当前类型筛选重建目录树
+    /// 按当前类型筛选重建目录树（文件默认按大小从大到小排列）
     private func rebuildTree() {
-        let tree = FileTreeNode.buildTree(from: displayFiles)
+        let sorted = displayFiles.sorted { $0.size > $1.size }
+        let tree = FileTreeNode.buildTree(from: sorted)
         if tree.count <= 10 {
             setAll(tree, expanded: true)
             allExpanded = true
@@ -172,6 +184,21 @@ struct TorrentDetailView: View {
             n.isExpanded = expanded
             setAll(n.children, expanded: expanded)
         }
+    }
+
+    // MARK: - 全选 / 全不选
+
+    /// 当前筛选下是否全部已选（下载）
+    private var allSelected: Bool {
+        !displayFiles.isEmpty && displayFiles.allSatisfy { $0.priority > 0 }
+    }
+
+    /// 全选下载 / 全不选（跳过）
+    private func selectAllFiles() {
+        let newPrio = allSelected ? 0 : 1
+        let ids = displayFiles.map { $0.index }
+        guard !ids.isEmpty else { return }
+        Task { await setPriority(ids: ids, priority: newPrio) }
     }
 
     // MARK: - 勾选下载/不下载

@@ -1,12 +1,15 @@
 import Foundation
 import Network
 
-/// 本地 HTTP 代理服务器
+/// 本地 HTTP 代理服务器（多连接分段加速版）
 ///
 /// 用途：filebrowser 的文件流需要 X-Auth 认证，且返回的 Content-Type 是 application/octet-stream，
 /// 导致 AVPlayer / VLC 无法正确识别视频格式。本代理在 App 内起一个 127.0.0.1 的本地 HTTP 服务，
-/// 把「带认证的 filebrowser 文件流」转发成「无需认证 + 正确 MIME 的本地 URL」，
-/// 供 AVPlayer 和 VLC 播放。支持 Range（可拖动进度）。
+/// 把「带认证的 filebrowser 文件流」转发成「无需认证 + 正确 MIME 的本地 URL」。
+///
+/// 加速原理：运营商的限速通常是「按单条 TCP 连接」级的。播放器请求本地代理时，代理把文件按
+/// 字节切成若干段（每段 4MB），用多条并发连接各自带 Range 请求从 filebrowser 拉取，再按段序号
+/// 顺序喂给播放器 —— 多条连接各自叠加带宽，绕过单连接限速，总吞吐 ≈ 并发数 × 单连接限速。
 final class LocalProxyServer {
     static let shared = LocalProxyServer()
 
@@ -14,8 +17,8 @@ final class LocalProxyServer {
     private var port: UInt16 = 0
     /// 会话 key -> (上游 URL, X-Auth token)
     private var sessions: [String: (URL, String)] = [:]
-    /// 进行中的转发器（URLSession delegate 是弱引用，需强持有到完成）
-    private var activeForwarders: [StreamForwarder] = []
+    /// 进行中的下载引擎（URLSession delegate 是弱引用，需强持有到完成）
+    private var activeEngines: [MultiSegmentDownloader] = []
     private let queue = DispatchQueue(label: "qb.localproxy")
     private var started = false
 
@@ -71,8 +74,7 @@ final class LocalProxyServer {
                 let buf = buffer + data
                 if let range = buf.range(of: Data("\r\n\r\n".utf8)) {
                     let head = String(data: buf[..<range.lowerBound], encoding: .utf8) ?? ""
-                    let body = Data(buf[range.upperBound...])
-                    self.handleRequest(head, connection: conn, body: body)
+                    self.handleRequest(head, connection: conn, body: Data(buf[range.upperBound...]))
                 } else {
                     self.receiveRequest(conn, buffer: buf)
                 }
@@ -92,11 +94,20 @@ final class LocalProxyServer {
         }
         let path = String(parts[1])
 
-        var range: String?
+        var rangeStart: Int64 = 0
+        var rangeEnd: Int64? = nil
         for line in lines.dropFirst() {
             if line.lowercased().hasPrefix("range:") {
-                range = line.split(separator: ":", maxSplits: 1).map(String.init)[1]
+                let r = line.split(separator: ":", maxSplits: 1).map(String.init)[1]
                     .trimmingCharacters(in: .whitespacesAndNewlines)
+                let body2 = r.replacingOccurrences(of: "bytes=", with: "").trimmingCharacters(in: .whitespaces)
+                let seg = body2.split(separator: "-").map(String.init)
+                if seg.count >= 1, let s = Int64(seg[0].trimmingCharacters(in: .whitespaces)) {
+                    rangeStart = s
+                }
+                if seg.count >= 2, !seg[1].isEmpty, let e = Int64(seg[1].trimmingCharacters(in: .whitespaces)) {
+                    rangeEnd = e
+                }
             }
         }
 
@@ -106,31 +117,23 @@ final class LocalProxyServer {
             sendSimple(connection, code: 404, body: "not found")
             return
         }
-        forward(connection, target: session.0, token: session.1, range: range)
+        forward(connection, target: session.0, token: session.1, start: rangeStart, end: rangeEnd)
     }
 
-    // MARK: - 转发
+    // MARK: - 转发（多连接分段）
 
-    private func forward(_ conn: NWConnection, target: URL, token: String, range: String?) {
-        var req = URLRequest(url: target)
-        req.setValue(token, forHTTPHeaderField: "X-Auth")
-        if let range = range {
-            req.setValue(range, forHTTPHeaderField: "Range")
-        }
-        let forwarder = StreamForwarder(conn: conn, queue: queue, contentType: Self.mimeType(for: target))
-        activeForwarders.append(forwarder)
-        let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 60
-        let session = URLSession(configuration: cfg, delegate: forwarder, delegateQueue: nil)
-        forwarder.session = session
-        forwarder.onComplete = { [weak self, weak forwarder] in
-            guard let self = self, let forwarder = forwarder else { return }
+    private func forward(_ conn: NWConnection, target: URL, token: String, start: Int64, end: Int64?) {
+        let engine = MultiSegmentDownloader(conn: conn, target: target, token: token,
+                                            start: start, explicitEnd: end, queue: queue,
+                                            contentType: Self.mimeType(for: target))
+        activeEngines.append(engine)
+        engine.onComplete = { [weak self, weak engine] in
+            guard let self = self, let engine = engine else { return }
             self.queue.async {
-                self.activeForwarders.removeAll { $0 === forwarder }
+                self.activeEngines.removeAll { $0 === engine }
             }
         }
-        forwarder.task = session.dataTask(with: req)
-        forwarder.task?.resume()
+        engine.start()
     }
 
     private func sendSimple(_ conn: NWConnection, code: Int, body: String) {
@@ -170,79 +173,294 @@ final class LocalProxyServer {
     }
 }
 
-/// 流式转发：把 URLSession 的数据流式写给 NWConnection（所有连接操作都在代理队列上执行）
-private final class StreamForwarder: NSObject, URLSessionDataDelegate {
+/// 多连接分段下载引擎：把一个 Range 切成多段并发拉取，按序输出给本地连接
+private final class MultiSegmentDownloader: NSObject {
     let conn: NWConnection
     let queue: DispatchQueue
-    let overrideContentType: String?
-    var task: URLSessionDataTask?
-    var session: URLSession?
+    let target: URL
+    let token: String
+    let start: Int64
+    let explicitEnd: Int64?
+    let contentType: String?
     var onComplete: (() -> Void)?
-    private var sentHeader = false
-    private var failed = false
 
-    init(conn: NWConnection, queue: DispatchQueue, contentType: String?) {
+    /// 每段大小与并发数（4 × 4MB ≈ 16MB 缓冲上限，兼顾速度与内存）
+    private static let SEG_SIZE: Int64 = 4 * 1024 * 1024
+    private static let CONCURRENCY = 4
+
+    private var nextStart: Int64
+    private var nextSeq = 0
+    private var nextToSend = 0
+    private var activeCount = 0
+    private var endReached = false
+    private var failed = false
+    private var failed416 = false
+    private var headerPrepared = false
+    private var headerSent = false
+    private var responseHeader: String?
+    /// seq -> 已下载完成的段数据（顺序输出）
+    private var readyData: [Int: Data] = [:]
+    /// 强持有正在下载的段（URLSession delegate 是弱引用）
+    private var activeSegments: [Int: SegmentDownloader] = [:]
+
+    init(conn: NWConnection, target: URL, token: String, start: Int64,
+         explicitEnd: Int64?, queue: DispatchQueue, contentType: String?) {
         self.conn = conn
+        self.target = target
+        self.token = token
+        self.start = start
+        self.explicitEnd = explicitEnd
         self.queue = queue
-        self.overrideContentType = contentType
+        self.contentType = contentType
+        self.nextStart = start
+    }
+
+    func start() {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.launchUpTo()
+            self.pump()
+        }
+    }
+
+    // MARK: - 分段
+
+    private func launchUpTo() {
+        while activeCount < Self.CONCURRENCY && !endReached && !failed {
+            launchOne()
+        }
+    }
+
+    private func launchOne() {
+        let segStart = nextStart
+        if let end = explicitEnd, segStart > end {
+            endReached = true
+            return
+        }
+        let segEnd: Int64
+        if let end = explicitEnd {
+            segEnd = min(segStart + Self.SEG_SIZE - 1, end)
+        } else {
+            segEnd = segStart + Self.SEG_SIZE - 1
+        }
+        nextStart = segEnd + 1
+        let seq = nextSeq
+        nextSeq += 1
+        activeCount += 1
+        let dl = SegmentDownloader(seq: seq, segStart: segStart, segEnd: segEnd,
+                                   owner: self, token: token, target: target)
+        activeSegments[seq] = dl
+        dl.start()
+    }
+
+    // MARK: - 段完成回调（在 queue 上）
+
+    func segmentDone(seq: Int, data: Data, status: Int, totalSize: Int64?, isShort: Bool) {
+        activeSegments.removeValue(forKey: seq)
+        activeCount -= 1
+        if failed { return }
+
+        if status == 416 {
+            endReached = true
+            if !headerPrepared {
+                prepareHeader416()
+            }
+        } else if status == 206 || status == 200 {
+            if !headerPrepared {
+                prepareHeader(totalSize: totalSize)
+            }
+            if !failed416 {
+                readyData[seq] = data
+            }
+            if isShort {
+                endReached = true
+            }
+        } else {
+            failAndCleanup()
+            return
+        }
+
+        if !endReached {
+            launchUpTo()
+        }
+        pump()
+    }
+
+    // MARK: - 响应头
+
+    private func prepareHeader(totalSize: Int64?) {
+        var h = "HTTP/1.1 206 X\r\n"
+        if let ct = contentType { h += "Content-Type: \(ct)\r\n" }
+        if let total = totalSize, total > 0 {
+            if start >= total {
+                prepareHeader416()
+                return
+            }
+            let actualLast: Int64
+            if let e = explicitEnd {
+                actualLast = min(e, total - 1)
+            } else {
+                actualLast = total - 1
+            }
+            let contentLength = actualLast - start + 1
+            h += "Content-Range: bytes \(start)-\(actualLast)/\(total)\r\n"
+            h += "Content-Length: \(contentLength)\r\n"
+        }
+        h += "Accept-Ranges: bytes\r\n"
+        h += "Connection: close\r\n\r\n"
+        responseHeader = h
+        headerPrepared = true
+    }
+
+    private func prepareHeader416() {
+        responseHeader = "HTTP/1.1 416 X\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        headerPrepared = true
+        failed416 = true
+        endReached = true
+    }
+
+    // MARK: - 顺序输出
+
+    private func pump() {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            if self.failed { return }
+
+            // 先发响应头
+            if let header = self.responseHeader, !self.headerSent {
+                self.headerSent = true
+                self.conn.send(content: Data(header.utf8), completion: .contentProcessed { [weak self] _ in
+                    self?.queue.async {
+                        if self?.failed416 == true {
+                            self?.finish()
+                        } else {
+                            self?.pump()
+                        }
+                    }
+                })
+                return
+            }
+
+            // 按段序号顺序发送
+            if let data = self.readyData.removeValue(forKey: self.nextToSend) {
+                self.nextToSend += 1
+                self.conn.send(content: data, completion: .contentProcessed { [weak self] error in
+                    self?.queue.async {
+                        if error != nil {
+                            self?.failAndCleanup()
+                        } else {
+                            self?.pump()
+                        }
+                    }
+                })
+                return
+            }
+
+            // 无就绪段：全部完成则结束，否则等后续段完成再触发
+            if self.isDone() {
+                self.finish()
+            }
+        }
+    }
+
+    private func isDone() -> Bool {
+        endReached && nextToSend >= nextSeq && activeCount == 0
+    }
+
+    private func finish() {
+        conn.cancel()
+        onComplete?()
+        onComplete = nil
+    }
+
+    private func failAndCleanup() {
+        failed = true
+        for (_, dl) in activeSegments {
+            dl.cancel()
+        }
+        activeSegments.removeAll()
+        readyData.removeAll()
+        conn.cancel()
+        onComplete?()
+        onComplete = nil
+    }
+}
+
+/// 单个段的下载器：请求一个 Range，把数据完整缓冲到内存
+private final class SegmentDownloader: NSObject, URLSessionDataDelegate {
+    let seq: Int
+    let segStart: Int64
+    let segEnd: Int64
+    weak var owner: MultiSegmentDownloader?
+    let token: String
+    let target: URL
+    var session: URLSession?
+    var task: URLSessionDataTask?
+    private var data = Data()
+    private var statusCode = 0
+    private var totalSize: Int64?
+
+    init(seq: Int, segStart: Int64, segEnd: Int64, owner: MultiSegmentDownloader,
+         token: String, target: URL) {
+        self.seq = seq
+        self.segStart = segStart
+        self.segEnd = segEnd
+        self.owner = owner
+        self.token = token
+        self.target = target
+    }
+
+    func start() {
+        var req = URLRequest(url: target)
+        req.setValue(token, forHTTPHeaderField: "X-Auth")
+        req.setValue("bytes=\(segStart)-\(segEnd)", forHTTPHeaderField: "Range")
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 60
+        let session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
+        self.session = session
+        task = session.dataTask(with: req)
+        task?.resume()
+    }
+
+    func cancel() {
+        task?.cancel()
+        session?.invalidateAndCancel()
+        session = nil
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         guard let http = response as? HTTPURLResponse else {
-            failed = true
             completionHandler(.cancel)
             return
         }
-        // 转发响应头（用映射的 MIME 覆盖 octet-stream，保留 Range 字段）
-        var header = "HTTP/1.1 \(http.statusCode) X\r\n"
-        var hasLength = false
-        for key in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag", "Content-Disposition"] {
-            if let v = http.value(forHTTPHeaderField: key) {
-                if key == "Content-Type", let mime = overrideContentType, v == "application/octet-stream" {
-                    header += "Content-Type: \(mime)\r\n"
-                    continue
-                }
-                if key == "Content-Length" { hasLength = true }
-                header += "\(key): \(v)\r\n"
+        statusCode = http.statusCode
+        if let cr = http.value(forHTTPHeaderField: "Content-Range") {
+            let parts = cr.replacingOccurrences(of: "bytes ", with: "").split(separator: "/")
+            if let last = parts.last, let tot = Int64(last) {
+                totalSize = tot
             }
         }
-        if !hasLength {
-            header += "Transfer-Encoding: chunked\r\n"
-        }
-        header += "Connection: close\r\n\r\n"
-        let payload = Data(header.utf8)
-        queue.async { [weak self] in
-            self?.conn.send(content: payload, completion: .contentProcessed { _ in })
-        }
-        sentHeader = true
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard !failed else { return }
-        // 背压：暂停上游下载，等本地连接写完这块再恢复，避免大文件全量下载进内存导致卡顿/崩溃
-        dataTask.suspend()
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            self.conn.send(content: data, completion: .contentProcessed { [weak self] error in
-                self?.queue.async {
-                    if error != nil {
-                        self?.failed = true
-                        self?.task?.cancel()
-                    } else {
-                        self?.task?.resume()
-                    }
-                }
-            })
-        }
+        self.data.append(data)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        queue.async { [weak self] in
-            self?.conn.cancel()
+        let d = data
+        let status = statusCode
+        let total = totalSize
+        let reqLen = segEnd - segStart + 1
+        let isShort = Int64(d.count) < reqLen
+        // 闭包强持有 self，保证本段完成清理执行完
+        owner?.queue.async {
+            self.owner?.segmentDone(seq: self.seq, data: d, status: status,
+                                    totalSize: total, isShort: isShort)
+            self.session?.invalidateAndCancel()
+            self.session = nil
         }
-        onComplete?()
     }
 }

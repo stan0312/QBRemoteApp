@@ -198,6 +198,7 @@ private final class MultiSegmentDownloader: NSObject {
     private var activeCount = 0
     private var endReached = false
     private var failed = false
+    private var failed416 = false
     private var headerPrepared = false
     private var headerSent = false
     private var responseHeader: String?

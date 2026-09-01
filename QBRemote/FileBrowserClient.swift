@@ -141,6 +141,45 @@ class FileBrowserClient: ObservableObject {
         guard let data = s.data(using: .utf8) else { return nil }
         return "Basic " + data.base64EncodedString()
     }
+
+    /// 创建免认证公开分享链接（返回 hash 与公开 URL）
+    /// 分享 URL 无需 X-Auth、支持 HTTP Range，可被 SenPlayer / VidHub / Filebar 等第三方播放器直接打开
+    func createShare(relativePath: String, hours: Int = 24) async throws -> (hash: String, url: String)? {
+        guard let token = token else { throw FBError.invalidToken }
+        var rel = relativePath
+        if !rel.hasPrefix("/") { rel = "/" + rel }
+        guard let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: baseURL + "/api/share" + encoded + "?expires=\(hours)&unit=hours") else {
+            throw FBError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue(token, forHTTPHeaderField: "X-Auth")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data(#"{"password":""}"#.utf8)
+        let (data, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
+            throw FBError.serverError(http.statusCode)
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let hash = obj["hash"] as? String, !hash.isEmpty else {
+            return nil
+        }
+        return (hash, baseURL + "/api/public/dl/" + hash)
+    }
+
+    /// 删除分享链接（清理用）
+    func deleteShare(hash: String) async throws {
+        guard let token = token else { throw FBError.invalidToken }
+        guard let url = URL(string: baseURL + "/api/share/" + hash) else { throw FBError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        req.setValue(token, forHTTPHeaderField: "X-Auth")
+        let (_, resp) = try await session.data(for: req)
+        if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
+            throw FBError.serverError(http.statusCode)
+        }
+    }
 }
 
 enum FBError: LocalizedError {

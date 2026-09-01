@@ -348,23 +348,96 @@ struct MediaItemView: View {
 
     private func loadImage(url: URL) {
         guard let token = fb.token else { imageError = true; return }
+        // 先探测文件总大小（Range 请求拿 Content-Range），支持则走多连接并发下载（绕单连接限速）
+        var probe = URLRequest(url: url)
+        probe.setValue(token, forHTTPHeaderField: "X-Auth")
+        probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        URLSession.shared.dataTask(with: probe) { [weak self] _, resp, _ in
+            guard let self = self else { return }
+            var total: Int64 = -1
+            if let http = resp as? HTTPURLResponse,
+               http.statusCode == 206,
+               let cr = http.value(forHTTPHeaderField: "Content-Range"),
+               let last = cr.split(separator: "/").last,
+               let t = Int64(last) {
+                total = t
+            }
+            if total <= 0 {
+                DispatchQueue.main.async { self.loadImageSingle(url: url) }
+            } else {
+                self.downloadImageSegments(url: url, token: token, total: total)
+            }
+        }.resume()
+    }
+
+    /// 多连接并发下载图片并解码（分 4 段，按序合并，绕单连接限速）
+    private func downloadImageSegments(url: URL, token: String, total: Int64) {
+        let parts = 4
+        let segSize = (total + Int64(parts) - 1) / Int64(parts)
+        var datas: [Int: Data] = [:]
+        var failed = false
+        let lock = NSLock()
+        let group = DispatchGroup()
+        for i in 0..<parts {
+            let start = Int64(i) * segSize
+            let end = min(start + segSize - 1, total - 1)
+            guard start <= end else { continue }
+            group.enter()
+            var req = URLRequest(url: url)
+            req.setValue(token, forHTTPHeaderField: "X-Auth")
+            req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+            URLSession.shared.dataTask(with: req) { data, _, _ in
+                defer { group.leave() }
+                if let data = data {
+                    lock.lock(); datas[i] = data; lock.unlock()
+                } else {
+                    failed = true
+                }
+            }.resume()
+        }
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            if failed {
+                self.loadImageSingle(url: url)
+                return
+            }
+            var merged = Data()
+            for i in 0..<parts {
+                if let d = datas[i] { merged.append(d) }
+            }
+            if merged.isEmpty {
+                self.imageError = true
+            } else {
+                self.decodeImage(data: merged)
+            }
+        }
+    }
+
+    /// 单连接整下（无 Range 支持或分段失败时回退）
+    private func loadImageSingle(url: URL) {
+        guard let token = fb.token else { imageError = true; return }
         var req = URLRequest(url: url)
         req.setValue(token, forHTTPHeaderField: "X-Auth")
         URLSession.shared.dataTask(with: req) { data, _, _ in
             DispatchQueue.main.async {
                 if let data = data {
-                    if self.file.fileExtension == "gif", let gif = Self.animatedImage(from: data) {
-                        self.image = gif
-                    } else if let img = UIImage(data: data) {
-                        self.image = img
-                    } else {
-                        self.imageError = true
-                    }
+                    self.decodeImage(data: data)
                 } else {
                     self.imageError = true
                 }
             }
         }.resume()
+    }
+
+    /// 解码图片（gif 动图 / 静态图）
+    private func decodeImage(data: Data) {
+        if self.file.fileExtension == "gif", let gif = Self.animatedImage(from: data) {
+            self.image = gif
+        } else if let img = UIImage(data: data) {
+            self.image = img
+        } else {
+            self.imageError = true
+        }
     }
 
     /// GIF 动图解码（ImageIO 逐帧合成动画 UIImage）

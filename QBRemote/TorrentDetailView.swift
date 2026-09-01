@@ -39,6 +39,9 @@ struct TorrentDetailView: View {
     @State private var pendingDeleteFile: TorrentFile?
     @State private var showDeleteFileDialog = false
     @State private var contentType: ContentTypeFilter = .all
+    @State private var shareURL: URL?
+    @State private var showShareSheet = false
+    @State private var sharingFile = false
 
     /// 当前显示的文件（按类型筛选）
     private var displayFiles: [TorrentFile] {
@@ -111,7 +114,8 @@ struct TorrentDetailView: View {
                                              onToggleFile: { file in toggleFile(file) },
                                              onToggleFolder: { n in toggleFolder(n) },
                                              onPreview: { file in handleTap(file) },
-                                             onDeleteFile: { file in pendingDeleteFile = file; showDeleteFileDialog = true })
+                                             onDeleteFile: { file in pendingDeleteFile = file; showDeleteFileDialog = true },
+                                             onShare: { file in Task { await createAndShare(file) } })
                         }
                     }
                     .refreshable { await load() }
@@ -140,6 +144,53 @@ struct TorrentDetailView: View {
             Button("取消", role: .cancel) {}
         } message: { _ in
             Text("将永久删除 NAS 上的文件。删除后任务会显示文件缺失，建议稍后重新校验该任务。")
+        }
+        .sheet(isPresented: $showShareSheet) {
+            if let url = shareURL {
+                ShareSheet(items: [url])
+            }
+        }
+        .overlay {
+            if sharingFile {
+                ZStack {
+                    Color.black.opacity(0.2).ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("正在生成分享链接...")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - 用其他 App 打开（生成免认证分享链接）
+
+    private func createAndShare(_ file: TorrentFile) async {
+        guard fb.token != nil else {
+            opMessage = "FileBrowser 未登录，请返回设置检查"
+            showOpMessage = true
+            return
+        }
+        guard file.isPreviewable else { return }
+        sharingFile = true
+        defer { sharingFile = false }
+        let rel = fb.fbRelativePath(savePath: torrent.save_path,
+                                    relativeName: file.name,
+                                    prefix: settings.pathPrefix)
+        do {
+            if let share = try await fb.createShare(relativePath: rel, hours: 24),
+               let url = URL(string: share.url) {
+                shareURL = url
+                showShareSheet = true
+            } else {
+                opMessage = "生成分享链接失败，请检查 filebrowser 版本是否支持分享"
+                showOpMessage = true
+            }
+        } catch {
+            opMessage = "分享失败: \(error.localizedDescription)"
+            showOpMessage = true
         }
     }
 
@@ -277,6 +328,7 @@ struct FileTreeNodeView: View {
     let onToggleFolder: (FileTreeNode) -> Void
     let onPreview: (TorrentFile) -> Void
     let onDeleteFile: (TorrentFile) -> Void
+    let onShare: (TorrentFile) -> Void
 
     var body: some View {
         if node.isDirectory {
@@ -286,7 +338,8 @@ struct FileTreeNodeView: View {
                                      onToggleFile: onToggleFile,
                                      onToggleFolder: onToggleFolder,
                                      onPreview: onPreview,
-                                     onDeleteFile: onDeleteFile)
+                                     onDeleteFile: onDeleteFile,
+                                     onShare: onShare)
                 }
             } label: {
                 HStack(spacing: 8) {
@@ -309,7 +362,8 @@ struct FileTreeNodeView: View {
             FileRow(file: file,
                     onToggleDownload: { onToggleFile(file) },
                     onPreview: { onPreview(file) },
-                    onDelete: { onDeleteFile(file) })
+                    onDelete: { onDeleteFile(file) },
+                    onShare: { onShare(file) })
         }
     }
 
@@ -321,12 +375,13 @@ struct FileTreeNodeView: View {
     }
 }
 
-/// 文件行：勾选下载 + 预览 + 长按删除
+/// 文件行：勾选下载 + 预览 + 长按菜单（删除 / 用其他 App 打开）
 struct FileRow: View {
     let file: TorrentFile
     let onToggleDownload: () -> Void
     let onPreview: () -> Void
     let onDelete: () -> Void
+    let onShare: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
@@ -390,6 +445,13 @@ struct FileRow: View {
             }
             .disabled(!file.isPreviewable)
 
+            Button {
+                onShare()
+            } label: {
+                Label("用其他 App 打开（绕限速）", systemImage: "square.and.arrow.up")
+            }
+            .disabled(!file.isPreviewable)
+
             Button(role: .destructive) {
                 onDelete()
             } label: {
@@ -403,4 +465,16 @@ struct FileRow: View {
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
     }
+}
+
+/// 系统分享面板（UIActivityViewController 的 SwiftUI 包装）
+/// 用于把免认证的分享链接交给 SenPlayer / VidHub / Safari 等打开
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

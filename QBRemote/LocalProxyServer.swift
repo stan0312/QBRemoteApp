@@ -179,7 +179,7 @@ private final class MultiSegmentDownloader: NSObject {
     let queue: DispatchQueue
     let target: URL
     let token: String
-    let start: Int64
+    let requestStart: Int64
     let explicitEnd: Int64?
     let contentType: String?
     var onComplete: (() -> Void)?
@@ -208,7 +208,7 @@ private final class MultiSegmentDownloader: NSObject {
         self.conn = conn
         self.target = target
         self.token = token
-        self.start = start
+        self.requestStart = start
         self.explicitEnd = explicitEnd
         self.queue = queue
         self.contentType = contentType
@@ -292,7 +292,7 @@ private final class MultiSegmentDownloader: NSObject {
         var h = "HTTP/1.1 206 X\r\n"
         if let ct = contentType { h += "Content-Type: \(ct)\r\n" }
         if let total = totalSize, total > 0 {
-            if start >= total {
+            if requestStart >= total {
                 prepareHeader416()
                 return
             }
@@ -302,8 +302,8 @@ private final class MultiSegmentDownloader: NSObject {
             } else {
                 actualLast = total - 1
             }
-            let contentLength = actualLast - start + 1
-            h += "Content-Range: bytes \(start)-\(actualLast)/\(total)\r\n"
+            let contentLength = actualLast - requestStart + 1
+            h += "Content-Range: bytes \(requestStart)-\(actualLast)/\(total)\r\n"
             h += "Content-Length: \(contentLength)\r\n"
         }
         h += "Accept-Ranges: bytes\r\n"

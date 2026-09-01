@@ -466,15 +466,3 @@ struct FileRow: View {
         return formatter.string(fromByteCount: bytes)
     }
 }
-
-/// 系统分享面板（UIActivityViewController 的 SwiftUI 包装）
-/// 用于把免认证的分享链接交给 SenPlayer / VidHub / Safari 等打开
-struct ShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
-}

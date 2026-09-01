@@ -352,8 +352,7 @@ struct MediaItemView: View {
         var probe = URLRequest(url: url)
         probe.setValue(token, forHTTPHeaderField: "X-Auth")
         probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-        URLSession.shared.dataTask(with: probe) { [weak self] _, resp, _ in
-            guard let self = self else { return }
+        URLSession.shared.dataTask(with: probe) { _, resp, _ in
             var total: Int64 = -1
             if let http = resp as? HTTPURLResponse,
                http.statusCode == 206,
@@ -395,8 +394,7 @@ struct MediaItemView: View {
                 }
             }.resume()
         }
-        group.notify(queue: .main) { [weak self] in
-            guard let self = self else { return }
+        group.notify(queue: .main) {
             if failed {
                 self.loadImageSingle(url: url)
                 return

@@ -126,9 +126,10 @@ class QBClient: ObservableObject {
 
     /// 设置文件优先级（0=跳过/不下载, 1=正常, 6=高, 7=最高）
     func setFilePriority(hash: String, ids: [Int], priority: Int) async throws {
+        // 注意：qB filePrio 要求多个文件 id 用 | 分隔（逗号会返回 400）
         let params = [
             "hash": hash,
-            "id": ids.map(String.init).joined(separator: ","),
+            "id": ids.map(String.init).joined(separator: "|"),
             "priority": "\(priority)"
         ]
         _ = try await postForm("/api/v2/torrents/filePrio", params: params)

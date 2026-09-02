@@ -3,6 +3,7 @@ import AVKit
 import AVFoundation
 import ImageIO
 import MobileVLCKit
+import WebKit
 
 /// 媒体预览：同级目录左右滑动切换，逐个预览
 /// - mp4/mov/m4v 等原生格式：AVPlayer 直接播放（带 X-Auth）
@@ -91,6 +92,10 @@ struct MediaItemView: View {
     @State private var vlcReady = false
     @State private var vlcError = false
     @State private var showFullScreen = false
+    @State private var htmlURL: URL?
+    @State private var htmlReady = false
+    @State private var htmlError = false
+    @State private var htmlBusy = false
 
     private var rawURL: URL? {
         fb.rawURL(savePath: torrent.save_path, relativeName: file.name, prefix: settings.pathPrefix)
@@ -99,6 +104,11 @@ struct MediaItemView: View {
     /// AVPlayer 是否原生支持该格式（MKV/AVI/WMV/FLV/WebM 等不支持）
     private var isNativePlayable: Bool {
         !file.isVideo || ["mp4", "mov", "m4v", "3gp", "m4a"].contains(file.fileExtension)
+    }
+
+    /// HTML5（WKWebView <video>/<audio>）可播放的格式（iOS Safari 原生支持）
+    private var isHtml5Playable: Bool {
+        ["mp4", "mov", "m4v", "mp3", "m4a", "wav", "aac"].contains(file.fileExtension)
     }
 
     var body: some View {
@@ -142,15 +152,10 @@ struct MediaItemView: View {
     private var content: some View {
         if file.isImage {
             imageContent
-        } else if file.isAudio {
-            audioContent
+        } else if isHtml5Playable {
+            html5Content
         } else if file.isVideo {
-            if isNativePlayable {
-                VideoPlayer(player: avPlayer)
-                    .ignoresSafeArea()
-            } else {
-                vlcContent
-            }
+            htmlErrorContent
         }
     }
 
@@ -172,6 +177,97 @@ struct MediaItemView: View {
         } else {
             ProgressView()
                 .tint(.white)
+        }
+    }
+
+    // MARK: - HTML5 播放（WKWebView <video>/<audio>，播放免认证分享链接）
+
+    @ViewBuilder
+    private var html5Content: some View {
+        if let url = htmlURL, htmlReady {
+            HTML5VideoView(url: url, isAudio: file.isAudio)
+                .ignoresSafeArea()
+        } else if htmlError {
+            htmlErrorContent
+        } else {
+            VStack(spacing: 12) {
+                ProgressView()
+                    .tint(.white)
+                Text("正在生成播放链接...")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
+            }
+        }
+    }
+
+    /// HTML5 无法播放（格式不支持或生成链接失败）时的界面
+    @ViewBuilder
+    private var htmlErrorContent: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 44))
+                .foregroundColor(.orange)
+            Text("无法用 HTML5 播放器播放 .\(file.fileExtension)")
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            Text("iOS 的 HTML5 播放器不支持该格式，可生成免认证链接用 SenPlayer / VidHub / Safari 打开")
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            Button {
+                openExternal()
+            } label: {
+                Label("用其他 App 打开（绕限速）", systemImage: "square.and.arrow.up")
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+                    .background(Color.blue.opacity(0.85))
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+            }
+            saveButton
+        }
+    }
+
+    /// 创建免认证分享链接用于 HTML5 播放
+    private func createHtml5Share() {
+        guard !htmlBusy else { return }
+        guard fb.token != nil else { htmlError = true; return }
+        htmlBusy = true
+        let rel = fb.fbRelativePath(savePath: torrent.save_path,
+                                    relativeName: file.name,
+                                    prefix: settings.pathPrefix)
+        Task {
+            do {
+                if let share = try await fb.createShare(relativePath: rel, hours: 24),
+                   let u = URL(string: share.url) {
+                    self.htmlURL = u
+                    self.htmlReady = true
+                } else {
+                    self.htmlError = true
+                }
+            } catch {
+                self.htmlError = true
+            }
+            self.htmlBusy = false
+        }
+    }
+
+    /// 生成分享链接并弹出分享面板（给 SenPlayer / VidHub / Safari 打开）
+    private func openExternal() {
+        guard fb.token != nil else { return }
+        let rel = fb.fbRelativePath(savePath: torrent.save_path,
+                                    relativeName: file.name,
+                                    prefix: settings.pathPrefix)
+        Task {
+            do {
+                if let share = try await fb.createShare(relativePath: rel, hours: 24),
+                   let u = URL(string: share.url) {
+                    self.localFileURL = u
+                    self.showShare = true
+                }
+            } catch {}
         }
     }
 
@@ -270,14 +366,11 @@ struct MediaItemView: View {
         guard let url = rawURL else { return }
         if file.isImage {
             loadImage(url: url)
-        } else if file.isAudio {
-            startNative(url: url, isAudio: true)
-        } else if file.isVideo {
-            if isNativePlayable {
-                startNative(url: url, isAudio: false)
-            } else {
-                startVLC(target: url)
-            }
+        } else if isHtml5Playable {
+            createHtml5Share()
+        } else {
+            // iOS 的 HTML5 播放器不支持 mkv/avi/wmv/flv/webm 等格式
+            htmlError = true
         }
     }
 
@@ -344,6 +437,10 @@ struct MediaItemView: View {
         vlcError = false
         image = nil
         imageError = false
+        htmlURL = nil
+        htmlReady = false
+        htmlError = false
+        htmlBusy = false
     }
 
     private func loadImage(url: URL) {
@@ -700,4 +797,47 @@ struct ShareSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+/// HTML5 播放视图（WKWebView 内嵌 <video>/<audio>，播放免认证分享链接）
+/// iOS 的 WKWebView 播放 mp4/mov/m4v/mp3 等原生支持格式，控件自带全屏/进度/倍速
+struct HTML5VideoView: UIViewRepresentable {
+    let url: URL
+    let isAudio: Bool
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.backgroundColor = .black
+        webView.isOpaque = false
+        webView.scrollView.isScrollEnabled = false
+        let src = url.absoluteString
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "%22")
+        let tag = isAudio ? "audio" : "video"
+        let html = """
+        <!DOCTYPE html><html><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>
+        html,body{margin:0;padding:0;background:#000;width:100%;height:100%;overflow:hidden}
+        body{display:flex;align-items:center;justify-content:center}
+        video{width:100%;height:100%;object-fit:contain;background:#000}
+        audio{width:92%}
+        .err{color:#ccc;font-family:-apple-system,sans-serif;font-size:14px;text-align:center;padding:24px}
+        </style></head><body>
+        <\(tag) id="m" controls autoplay playsinline webkit-playsinline src="\(src)"></\(tag)>
+        <script>
+        var m=document.getElementById('m');
+        m.addEventListener('error',function(){
+            document.body.innerHTML='<div class="err">无法播放，请用其他 App 打开</div>';
+        });
+        </script></body></html>
+        """
+        webView.loadHTMLString(html, baseURL: nil)
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
 }

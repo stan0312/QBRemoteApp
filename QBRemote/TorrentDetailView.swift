@@ -93,17 +93,6 @@ struct TorrentDetailView: View {
                                 .foregroundColor(.blue)
                             }
                             Spacer()
-                            Button {
-                                selectAllFiles()
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: allSelected ? "checkmark.circle.fill" : "checkmark.circle")
-                                    Text(allSelected ? "全不选" : "全选下载")
-                                        .font(.caption.weight(.medium))
-                                }
-                                .foregroundColor(.green)
-                            }
-                            Spacer()
                             Text("\(displayFiles.count) 个文件 · 勾选=下载")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)

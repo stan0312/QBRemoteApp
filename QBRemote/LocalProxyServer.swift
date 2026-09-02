@@ -13,13 +13,16 @@ import Network
 ///
 /// 流式要点：响应头在第一个分段返回时立即转发、分段的数据块到达即按序转发（不等待整段下载完），
 /// 保证首屏快速出画面，同时后台持续用多连接预取。
+///
+/// v12 增加：支持免认证的分享链接（token 传 nil 则不加 X-Auth）；响应统一带 CORS 头，允许
+/// WKWebView 内 file:// 页面的 JS 用 fetch 多连接 Range 拉流（供 MSE 播放器使用）。
 final class LocalProxyServer {
     static let shared = LocalProxyServer()
 
     private var listener: NWListener?
     private var port: UInt16 = 0
-    /// 会话 key -> (上游 URL, X-Auth token)
-    private var sessions: [String: (URL, String)] = [:]
+    /// 会话 key -> (上游 URL, X-Auth token，nil 表示免认证的分享链接)
+    private var sessions: [String: (URL, String?)] = [:]
     /// 进行中的下载引擎（URLSession delegate 是弱引用，需强持有到完成）
     private var activeEngines: [MultiSegmentDownloader] = []
     private let queue = DispatchQueue(label: "qb.localproxy")
@@ -52,7 +55,8 @@ final class LocalProxyServer {
     }
 
     /// 注册一个要播放的文件，返回本地 URL；代理尚未就绪时返回 nil（调用方可稍后重试）
-    func register(targetURL: URL, token: String) -> String? {
+    /// - Parameter token: filebrowser 的 X-Auth token；分享链接（免认证）传 nil
+    func register(targetURL: URL, token: String?) -> String? {
         var result: String?
         queue.sync {
             guard port != 0 else { result = nil; return }
@@ -91,7 +95,15 @@ final class LocalProxyServer {
         let lines = head.components(separatedBy: "\r\n")
         guard let first = lines.first else { sendSimple(connection, code: 400, body: "bad request"); return }
         let parts = first.split(separator: " ")
-        guard parts.count >= 2, parts[0] == "GET" else {
+        guard parts.count >= 2 else { sendSimple(connection, code: 400, body: "bad request"); return }
+        let method = String(parts[0])
+
+        // CORS 预检：fetch 带 Range 头会先发 OPTIONS
+        if method == "OPTIONS" {
+            sendOptions(connection)
+            return
+        }
+        guard method == "GET" else {
             sendSimple(connection, code: 405, body: "only GET supported")
             return
         }
@@ -125,7 +137,7 @@ final class LocalProxyServer {
 
     // MARK: - 转发（多连接分段）
 
-    private func forward(_ conn: NWConnection, target: URL, token: String, start: Int64, end: Int64?) {
+    private func forward(_ conn: NWConnection, target: URL, token: String?, start: Int64, end: Int64?) {
         let engine = MultiSegmentDownloader(conn: conn, target: target, token: token,
                                             start: start, explicitEnd: end, queue: queue,
                                             contentType: Self.mimeType(for: target))
@@ -140,7 +152,14 @@ final class LocalProxyServer {
     }
 
     private func sendSimple(_ conn: NWConnection, code: Int, body: String) {
-        let payload = "HTTP/1.1 \(code) X\r\nContent-Type: text/plain\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n\(body)"
+        let payload = "HTTP/1.1 \(code) X\r\nContent-Type: text/plain\r\nContent-Length: \(body.count)\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n\(body)"
+        conn.send(content: Data(payload.utf8), completion: .contentProcessed { _ in
+            conn.cancel()
+        })
+    }
+
+    private func sendOptions(_ conn: NWConnection) {
+        let payload = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Range, Content-Type\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         conn.send(content: Data(payload.utf8), completion: .contentProcessed { _ in
             conn.cancel()
         })
@@ -181,15 +200,15 @@ private final class MultiSegmentDownloader: NSObject {
     let conn: NWConnection
     let queue: DispatchQueue
     let target: URL
-    let token: String
+    let token: String?
     let requestStart: Int64
     let explicitEnd: Int64?
     let contentType: String?
     var onComplete: (() -> Void)?
 
-    /// 每段大小与并发数（6 × 2MB ≈ 12MB 缓冲上限，兼顾速度与内存）
+    /// 每段大小与并发数（8 × 2MB ≈ 16MB 缓冲上限，兼顾速度与内存）
     private static let SEG_SIZE: Int64 = 2 * 1024 * 1024
-    private static let CONCURRENCY = 6
+    private static let CONCURRENCY = 8
 
     private var nextStart: Int64
     private var nextSeq = 0
@@ -207,7 +226,7 @@ private final class MultiSegmentDownloader: NSObject {
     /// 强持有正在下载的段（URLSession delegate 是弱引用）
     private var activeSegments: [Int: SegmentDownloader] = [:]
 
-    init(conn: NWConnection, target: URL, token: String, start: Int64,
+    init(conn: NWConnection, target: URL, token: String?, start: Int64,
          explicitEnd: Int64?, queue: DispatchQueue, contentType: String?) {
         self.conn = conn
         self.target = target
@@ -263,6 +282,11 @@ private final class MultiSegmentDownloader: NSObject {
         if failed || headerSent { return }
         if status == 416 {
             prepareHeader416()
+            sendData(Data(responseHeader!.utf8))
+            headerSent = true
+            // 416 无 body，发完响应头立即关闭连接
+            failAndCleanup()
+            return
         } else if status == 206 || status == 200 {
             prepareHeader(totalSize: totalSize)
         } else {
@@ -271,9 +295,6 @@ private final class MultiSegmentDownloader: NSObject {
         }
         sendData(Data(responseHeader!.utf8))
         headerSent = true
-        if failed416 {
-            checkFinish()
-        }
     }
 
     /// 段数据块到达：当前段直接转发，后续段缓冲
@@ -346,13 +367,16 @@ private final class MultiSegmentDownloader: NSObject {
             h += "Content-Length: \(contentLength)\r\n"
         }
         h += "Accept-Ranges: bytes\r\n"
+        // CORS：允许 WKWebView 内 file:// 页面的 JS 跨源读取（MSE 播放器依赖）
+        h += "Access-Control-Allow-Origin: *\r\n"
+        h += "Access-Control-Expose-Headers: Content-Range, Accept-Ranges\r\n"
         h += "Connection: close\r\n\r\n"
         responseHeader = h
         headerPrepared = true
     }
 
     private func prepareHeader416() {
-        responseHeader = "HTTP/1.1 416 X\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        responseHeader = "HTTP/1.1 416 X\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
         headerPrepared = true
         failed416 = true
         endReached = true
@@ -402,7 +426,7 @@ private final class SegmentDownloader: NSObject, URLSessionDataDelegate {
     let segStart: Int64
     let segEnd: Int64
     weak var owner: MultiSegmentDownloader?
-    let token: String
+    let token: String?
     let target: URL
     var session: URLSession?
     var task: URLSessionDataTask?
@@ -411,7 +435,7 @@ private final class SegmentDownloader: NSObject, URLSessionDataDelegate {
     private var received = 0
 
     init(seq: Int, segStart: Int64, segEnd: Int64, owner: MultiSegmentDownloader,
-         token: String, target: URL) {
+         token: String?, target: URL) {
         self.seq = seq
         self.segStart = segStart
         self.segEnd = segEnd
@@ -422,7 +446,9 @@ private final class SegmentDownloader: NSObject, URLSessionDataDelegate {
 
     func start() {
         var req = URLRequest(url: target)
-        req.setValue(token, forHTTPHeaderField: "X-Auth")
+        if let token = token, !token.isEmpty {
+            req.setValue(token, forHTTPHeaderField: "X-Auth")
+        }
         req.setValue("bytes=\(segStart)-\(segEnd)", forHTTPHeaderField: "Range")
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 60

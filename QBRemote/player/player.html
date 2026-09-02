@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<style>
+html,body{margin:0;padding:0;background:#000;width:100%;height:100%;overflow:hidden;-webkit-user-select:none}
+video{width:100%;height:100%;object-fit:contain;background:#000}
+audio{width:92%;position:fixed;bottom:20px;left:4%}
+#status{position:fixed;top:10px;left:10px;color:#fff;font-size:11px;font-family:-apple-system,sans-serif;background:rgba(0,0,0,.55);padding:4px 9px;border-radius:4px;z-index:10;display:none;max-width:80%}
+#err{position:fixed;top:0;left:0;right:0;bottom:0;color:#ddd;font-family:-apple-system,sans-serif;font-size:14px;text-align:center;padding:24px;display:none;line-height:1.7;background:#111;overflow:auto}
+#err .hint{margin-top:14px;color:#999;font-size:12px}
+</style>
+</head>
+<body>
+<video id="v" controls autoplay playsinline webkit-playsinline></video>
+<audio id="a" controls autoplay style="display:none"></audio>
+<div id="status"></div>
+<div id="err"></div>
+<script src="mp4box.all.js"></script>
+<script>
+"use strict";
+(function(){
+  var video=document.getElementById('v');
+  var audio=document.getElementById('a');
+  var statusEl=document.getElementById('status');
+  var errEl=document.getElementById('err');
+  function status(s){ statusEl.style.display='block'; statusEl.textContent=s; }
+  function hideStatus(){ statusEl.style.display='none'; }
+  function showErr(s){ try{video.pause();}catch(e){} video.style.display='none'; audio.style.display='none'; errEl.style.display='block'; errEl.innerHTML=s+'<div class="hint">如一直无法播放，请在 App 里点击右上角「更多」用其他播放器打开</div>'; }
+
+  // ===== 配置 =====
+  var HEAD_CHUNK  = 2 * 1024 * 1024;      // 头部下载量（需含 moov）
+  var DOWNLOAD_CHUNK = 24 * 1024 * 1024;  // 每轮顺序下载字节数
+  var MIN_BUFFER_SECONDS = 20;            // 低于此继续下载
+  var MAX_BUFFER_SECONDS = 50;            // 缓冲上限
+
+  var currentUrl=null, fileSize=0;
+  var mp4box=null, ms=null, sbV=null, sbA=null;
+  var vTrack=null, aTrack=null;
+  var sbQueueV=[], sbQueueA=[];
+  var headLen=0, nextOffset=0;
+  var downloading=false, sessionAlive=false, mseActive=false;
+  var startSampleIdx=0, seekTarget=0;
+  var infoDurationMs=0;
+  var seekListenerBound=false;
+
+  function fetchRange(from,to){
+    return fetch(currentUrl,{headers:{'Range':'bytes='+from+'-'+to}}).then(function(r){
+      if(r.status!==206&&r.status!==200) throw new Error('HTTP '+r.status);
+      return r;
+    });
+  }
+
+  // ===== 音频（单连接即可）=====
+  function startAudio(urlStr){
+    currentUrl=urlStr;
+    video.style.display='none';
+    audio.style.display='block';
+    audio.src=urlStr;
+    audio.play().catch(function(){});
+  }
+
+  // ===== MSE 播放 =====
+  function startMse(urlStr, fromSampleIdx, seekTime){
+    currentUrl=urlStr;
+    sessionAlive=true;
+    mseActive=true;
+    startSampleIdx=fromSampleIdx||0;
+    seekTarget=seekTime||0;
+    status('准备中…');
+    probe().then(function(){
+      mp4box=MP4Box.createFile();
+      mp4box.onError=function(e){ if(sessionAlive) showErr('解析失败: '+e); };
+      mp4box.onReady=onReady;
+      mp4box.onSegment=onSegment;
+      var len=Math.min(fileSize, HEAD_CHUNK);
+      return fetchRange(0,len-1).then(function(res){
+        return res.arrayBuffer().then(function(buf){
+          buf.fileStart=0;
+          headLen=len;
+          mp4box.appendBuffer(buf);
+        });
+      });
+    }).catch(function(e){
+      showErr('初始化失败: '+(e&&e.message||e));
+    });
+  }
+
+  function probe(){
+    return fetchRange(0,0).then(function(r){
+      var cr=r.headers.get('Content-Range')||'';
+      var m=cr.match(/\/(\d+)/);
+      if(m){ fileSize=parseInt(m[1],10); return; }
+      return r.arrayBuffer().then(function(b){ fileSize=b.byteLength; });
+    });
+  }
+
+  function onReady(info){
+    if(!info.videoTracks||info.videoTracks.length===0){ showErr('未找到视频轨道'); return; }
+    infoDurationMs=info.duration||0;
+    var vt=info.videoTracks[0];
+    vTrack={ id:vt.id, codec:vt.codec, timescale:vt.timescale||1000, samples:null };
+    if(info.audioTracks&&info.audioTracks.length){ var at=info.audioTracks[0]; aTrack={ id:at.id, codec:at.codec, samples:null }; }
+    var vCodec='video/mp4; codecs="'+vTrack.codec+'"';
+    if(typeof MediaSource==='undefined'||!MediaSource.isTypeSupported(vCodec)){
+      showErr('此视频编码（'+vTrack.codec+'）在当前设备不支持 MSE 播放');
+      return;
+    }
+    var t=mp4box.getTrackById(vTrack.id);
+    if(!t||!t.samples||t.samples.length===0){ showErr('无法读取视频索引'); return; }
+    vTrack.samples=t.samples;
+    if(aTrack){ var ta=mp4box.getTrackById(aTrack.id); if(ta) aTrack.samples=ta.samples; }
+
+    var startOff=headLen;
+    if(startSampleIdx>0&&startSampleIdx<vTrack.samples.length){
+      startOff=Math.max(headLen, vTrack.samples[startSampleIdx].offset||0);
+    }
+    nextOffset=startOff;
+
+    ms=new MediaSource();
+    video.src=URL.createObjectURL(ms);
+    ms.addEventListener('sourceopen', function(){
+      try{
+        sbV=ms.addSourceBuffer(vCodec);
+        sbV.addEventListener('updateend', function(){ pumpSB(sbV, sbQueueV); });
+        if(aTrack){
+          var aCodec='audio/mp4; codecs="'+aTrack.codec+'"';
+          if(MediaSource.isTypeSupported(aCodec)){
+            sbA=ms.addSourceBuffer(aCodec);
+            sbA.addEventListener('updateend', function(){ pumpSB(sbA, sbQueueA); });
+          }
+        }
+        if(infoDurationMs>0){ try{ ms.duration=infoDurationMs/1000; }catch(e){} }
+        mp4box.setSegmentOptions(vTrack.id, null, {nbSamples:120});
+        if(aTrack) mp4box.setSegmentOptions(aTrack.id, null, {nbSamples:120});
+        if(seekTarget>0){
+          setTimeout(function(){ try{ video.currentTime=seekTarget; }catch(e){} }, 300);
+        }
+        video.play().catch(function(){});
+        status('缓冲中…');
+        setTimeout(scheduleNext, 80);
+      }catch(e){ showErr('播放初始化失败: '+(e&&e.message||e)); }
+    });
+    if(!seekListenerBound){
+      video.addEventListener('seeking', onSeek);
+      seekListenerBound=true;
+    }
+  }
+
+  function onSegment(id, buffer, sampleNum, isLast){
+    var s=String(id);
+    if(sbV&&s===String(vTrack.id)) appendToSB(sbV, sbQueueV, buffer);
+    else if(sbA&&aTrack&&s===String(aTrack.id)) appendToSB(sbA, sbQueueA, buffer);
+  }
+
+  function appendToSB(sb, queue, buf){
+    if(!sb) return;
+    queue.push(buf);
+    pumpSB(sb, queue);
+  }
+  function pumpSB(sb, queue){
+    if(sb.updating||queue.length===0) return;
+    var b=queue.shift();
+    try{ sb.appendBuffer(b); }catch(e){}
+  }
+
+  function bufferedEnd(sb){
+    try{ if(sb&&sb.buffered&&sb.buffered.length>0) return sb.buffered.end(sb.buffered.length-1); }catch(e){}
+    return 0;
+  }
+
+  function scheduleNext(){
+    if(!sessionAlive||downloading) return;
+    if(!sbV) return;
+    var ct=video.currentTime||0;
+    var be=bufferedEnd(sbV);
+    if(be-ct>MAX_BUFFER_SECONDS){ setTimeout(scheduleNext, 800); return; }
+    if(nextOffset>=fileSize){ hideStatus(); return; }
+    downloading=true;
+    var from=nextOffset;
+    var to=Math.min(fileSize-1, from+DOWNLOAD_CHUNK-1);
+    status('多连接缓冲 '+Math.round(be)+'s · '+formatMB(nextOffset)+'/'+formatMB(fileSize));
+    fetchRange(from,to).then(function(res){
+      return streamAppend(res, from);
+    }).then(function(){
+      nextOffset=to+1;
+      downloading=false;
+      if(sessionAlive) setTimeout(scheduleNext, 40);
+    }).catch(function(e){
+      downloading=false;
+      if(sessionAlive) setTimeout(scheduleNext, 1200);
+    });
+  }
+
+  function streamAppend(res, baseOffset){
+    return new Promise(function(resolve){
+      if(!res.body){
+        return res.arrayBuffer().then(function(buf){
+          if(!mp4box) return;
+          buf.fileStart=baseOffset;
+          try{ mp4box.appendBuffer(buf); }catch(e){}
+          resolve();
+        });
+      }
+      var reader=res.body.getReader();
+      var offset=baseOffset;
+      (function pump(){
+        reader.read().then(function(r){
+          if(r.done||!mp4box){ resolve(); return; }
+          var v=r.value;
+          var ab=new Uint8Array(v).buffer;
+          ab.fileStart=offset;
+          offset+=v.byteLength;
+          try{ mp4box.appendBuffer(ab); }catch(e){}
+          pump();
+        }).catch(function(){ resolve(); });
+      })();
+    });
+  }
+
+  // ===== seek：重建会话 =====
+  function onSeek(){
+    if(!sessionAlive) return;
+    var t=video.currentTime||0;
+    if(!vTrack||!vTrack.samples||vTrack.samples.length===0) return;
+    var idx=findSyncIndex(t);
+    var url=currentUrl;
+    destroySession();
+    startMse(url, idx, t);
+  }
+
+  function findSyncIndex(t){
+    var samples=vTrack.samples, ts=vTrack.timescale||1000, best=0;
+    for(var i=0;i<samples.length;i++){
+      if(samples[i].cts/ts<=t){ if(samples[i].is_sync) best=i; }
+      else break;
+    }
+    return best;
+  }
+
+  function playedSampleIndex(){
+    var samples=vTrack.samples; if(!samples) return 0;
+    var ts=vTrack.timescale||1000, t=video.currentTime||0;
+    var lo=0, hi=samples.length-1, idx=0;
+    while(lo<=hi){ var mid=(lo+hi)>>1; if(samples[mid].cts/ts<=t){ idx=mid; lo=mid+1; } else hi=mid-1; }
+    return idx;
+  }
+
+  function destroySession(){
+    sessionAlive=false;
+    downloading=false;
+    try{
+      if(sbV&&!sbV.updating&&sbV.buffered.length>0) sbV.remove(0, bufferedEnd(sbV));
+      if(sbA&&!sbA.updating&&sbA.buffered.length>0) sbA.remove(0, bufferedEnd(sbA));
+    }catch(e){}
+    try{ if(ms&&ms.readyState==='open') ms.endOfStream(); }catch(e){}
+    try{ if(video.src) URL.revokeObjectURL(video.src); }catch(e){}
+    video.removeAttribute('src');
+    sbQueueV.length=0; sbQueueA.length=0;
+    sbV=null; sbA=null; ms=null; mp4box=null; vTrack=null; aTrack=null;
+  }
+
+  // ===== 定期内存回收 =====
+  setInterval(function(){
+    if(!sessionAlive||!sbV||!mp4box) return;
+    try{
+      var ct=video.currentTime||0;
+      var rmTo=Math.max(0, ct-40);
+      if(sbV.buffered.length&&sbV.buffered.start(0)<rmTo&&!sbV.updating) sbV.remove(sbV.buffered.start(0), rmTo);
+      if(sbA&&sbA.buffered.length&&sbA.buffered.start(0)<rmTo&&!sbA.updating) sbA.remove(sbA.buffered.start(0), rmTo);
+      var pi=playedSampleIndex();
+      if(pi>120&&vTrack) mp4box.releaseUsedSamples(vTrack.id, pi-60);
+    }catch(e){}
+  }, 3000);
+
+  function formatMB(b){ return (b/1048576).toFixed(0)+'MB'; }
+
+  // ===== 入口 =====
+  window.startPlayback=function(urlStr, isAudio){
+    if(!urlStr){ showErr('无播放地址'); return; }
+    if(isAudio){ startAudio(urlStr); return; }
+    startMse(urlStr, 0, 0);
+  };
+
+  window.playFallback=function(urlStr){
+    video.style.display='block';
+    video.src=urlStr;
+    video.play().catch(function(){});
+  };
+})();
+</script>
+</body>
+</html>

@@ -231,6 +231,7 @@ struct MediaItemView: View {
     }
 
     /// 创建免认证分享链接用于 HTML5 播放
+    /// v12：分享链接注册到本地代理（免认证转发 + CORS + 多连接分段），供 MSE 播放器 JS fetch
     private func createHtml5Share() {
         guard !htmlBusy else { return }
         guard fb.token != nil else { htmlError = true; return }
@@ -242,15 +243,39 @@ struct MediaItemView: View {
             do {
                 if let share = try await fb.createShare(relativePath: rel, hours: 24),
                    let u = URL(string: share.url) {
-                    self.htmlURL = u
-                    self.htmlReady = true
+                    // 分享链接免认证，token 传 nil（本地代理不再附加 X-Auth）
+                    registerProxyNoAuth(u) { localURL in
+                        DispatchQueue.main.async {
+                            self.htmlURL = localURL
+                            self.htmlReady = true
+                        }
+                    }
                 } else {
-                    self.htmlError = true
+                    DispatchQueue.main.async { self.htmlError = true }
                 }
             } catch {
-                self.htmlError = true
+                DispatchQueue.main.async { self.htmlError = true }
             }
             self.htmlBusy = false
+        }
+    }
+
+    /// 注册免认证（分享链接）到本地代理，供 MSE 播放器使用
+    private func registerProxyNoAuth(_ target: URL, completion: @escaping (URL) -> Void) {
+        LocalProxyServer.shared.start()
+        retryRegisterNoAuth(target: target, attempt: 0, completion: completion)
+    }
+
+    private func retryRegisterNoAuth(target: URL, attempt: Int, completion: @escaping (URL) -> Void) {
+        if let local = LocalProxyServer.shared.register(targetURL: target, token: nil),
+           let url = URL(string: local) {
+            completion(url)
+        } else if attempt < 30 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.retryRegisterNoAuth(target: target, attempt: attempt + 1, completion: completion)
+            }
+        } else {
+            DispatchQueue.main.async { self.htmlError = true }
         }
     }
 
@@ -799,11 +824,15 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-/// HTML5 播放视图（WKWebView 内嵌 <video>/<audio>，播放免认证分享链接）
-/// iOS 的 WKWebView 播放 mp4/mov/m4v/mp3 等原生支持格式，控件自带全屏/进度/倍速
+/// HTML5 播放视图（WKWebView 内嵌 player.html）
+/// v12：加载 bundle 内的 player.html（mp4box + MSE 多连接分片），用 JS fetch 多连接 Range 拉本地代理
 struct HTML5VideoView: UIViewRepresentable {
     let url: URL
     let isAudio: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(url: url, isAudio: isAudio)
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -813,31 +842,31 @@ struct HTML5VideoView: UIViewRepresentable {
         webView.backgroundColor = .black
         webView.isOpaque = false
         webView.scrollView.isScrollEnabled = false
-        let src = url.absoluteString
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "\"", with: "%22")
-        let tag = isAudio ? "audio" : "video"
-        let html = """
-        <!DOCTYPE html><html><head><meta charset="utf-8">
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <style>
-        html,body{margin:0;padding:0;background:#000;width:100%;height:100%;overflow:hidden}
-        body{display:flex;align-items:center;justify-content:center}
-        video{width:100%;height:100%;object-fit:contain;background:#000}
-        audio{width:92%}
-        .err{color:#ccc;font-family:-apple-system,sans-serif;font-size:14px;text-align:center;padding:24px}
-        </style></head><body>
-        <\(tag) id="m" controls autoplay playsinline webkit-playsinline src="\(src)"></\(tag)>
-        <script>
-        var m=document.getElementById('m');
-        m.addEventListener('error',function(){
-            document.body.innerHTML='<div class="err">无法播放，请用其他 App 打开</div>';
-        });
-        </script></body></html>
-        """
-        webView.loadHTMLString(html, baseURL: nil)
+        webView.navigationDelegate = context.coordinator
+        if let base = Bundle.main.url(forResource: "player", withExtension: "html", subdirectory: "player") {
+            webView.loadFileURL(base, allowingReadAccessTo: base.deletingLastPathComponent())
+        }
         return webView
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.url = url
+        context.coordinator.isAudio = isAudio
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate {
+        var url: URL
+        var isAudio: Bool
+        init(url: URL, isAudio: Bool) {
+            self.url = url
+            self.isAudio = isAudio
+        }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            let src = url.absoluteString
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            let js = "window.startPlayback(\"\(src)\", \(isAudio));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
 }

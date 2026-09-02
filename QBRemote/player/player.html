@@ -112,6 +112,10 @@ audio{width:92%;position:fixed;bottom:20px;left:4%}
     vTrack.samples=t.samples;
     if(aTrack){ var ta=mp4box.getTrackById(aTrack.id); if(ta) aTrack.samples=ta.samples; }
 
+    // 标记视频/音频轨道进入分段模式（onSegment 输出 fMP4 的先决条件）
+    mp4box.setSegmentOptions(vTrack.id, null, {nbSamples:120});
+    if(aTrack) mp4box.setSegmentOptions(aTrack.id, null, {nbSamples:120});
+
     var startOff=headLen;
     if(startSampleIdx>0&&startSampleIdx<vTrack.samples.length){
       startOff=Math.max(headLen, vTrack.samples[startSampleIdx].offset||0);
@@ -132,8 +136,16 @@ audio{width:92%;position:fixed;bottom:20px;left:4%}
           }
         }
         if(infoDurationMs>0){ try{ ms.duration=infoDurationMs/1000; }catch(e){} }
-        mp4box.setSegmentOptions(vTrack.id, null, {nbSamples:120});
-        if(aTrack) mp4box.setSegmentOptions(aTrack.id, null, {nbSamples:120});
+        // 初始化分段：拿到 ftyp+moov 的 init segment 并 append 到对应 SourceBuffer
+        var initSegs=mp4box.initializeSegmentation();
+        for(var i=0;i<initSegs.length;i++){
+          try{
+            if(sbV&&String(initSegs[i].id)===String(vTrack.id)) sbV.appendBuffer(initSegs[i].buffer);
+            else if(sbA&&aTrack&&String(initSegs[i].id)===String(aTrack.id)) sbA.appendBuffer(initSegs[i].buffer);
+          }catch(e){}
+        }
+        // 开始分段处理（mp4box 会持续通过 onSegment 输出 fMP4 片段）
+        mp4box.start();
         if(seekTarget>0){
           setTimeout(function(){ try{ video.currentTime=seekTarget; }catch(e){} }, 300);
         }

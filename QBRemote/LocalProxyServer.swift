@@ -67,6 +67,11 @@ final class LocalProxyServer {
         return result
     }
 
+    /// 本地代理的根地址（供 MSE 播放器页面同源加载）；未就绪时返回 nil
+    var baseURL: String? {
+        queue.sync { port != 0 ? "http://127.0.0.1:\(port)/" : nil }
+    }
+
     // MARK: - 连接处理
 
     private func handleConnection(_ conn: NWConnection) {
@@ -108,6 +113,16 @@ final class LocalProxyServer {
             return
         }
         let path = String(parts[1])
+
+        // MSE 播放器静态页面（同源加载，避免 file:// fetch 限制）
+        if path == "/player.html" || path == "/player" || path == "/" {
+            serveBundleFile(connection, resource: "player.html", subpath: "player", mime: "text/html; charset=utf-8")
+            return
+        }
+        if path == "/mp4box.all.js" {
+            serveBundleFile(connection, resource: "mp4box.all.js", subpath: "player", mime: "application/javascript")
+            return
+        }
 
         var rangeStart: Int64 = 0
         var rangeEnd: Int64? = nil
@@ -161,6 +176,21 @@ final class LocalProxyServer {
     private func sendOptions(_ conn: NWConnection) {
         let payload = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Range, Content-Type\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         conn.send(content: Data(payload.utf8), completion: .contentProcessed { _ in
+            conn.cancel()
+        })
+    }
+
+    /// 从 App bundle 返回静态资源（MSE 播放器页面与其依赖的 JS）
+    private func serveBundleFile(_ conn: NWConnection, resource: String, subpath: String, mime: String) {
+        guard let url = Bundle.main.url(forResource: resource, withExtension: nil, subdirectory: subpath),
+              let data = try? Data(contentsOf: url) else {
+            sendSimple(conn, code: 404, body: "not found")
+            return
+        }
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: \(mime)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+        var payload = Data(header.utf8)
+        payload.append(data)
+        conn.send(content: payload, completion: .contentProcessed { _ in
             conn.cancel()
         })
     }
@@ -288,7 +318,13 @@ private final class MultiSegmentDownloader: NSObject {
             failAndCleanup()
             return
         } else if status == 206 || status == 200 {
-            prepareHeader(totalSize: totalSize)
+            if !prepareHeader(totalSize: totalSize) {
+                // 请求位置超出文件末尾（requestStart >= total）
+                sendData(Data(responseHeader!.utf8))
+                headerSent = true
+                failAndCleanup()
+                return
+            }
         } else {
             failAndCleanup()
             return
@@ -348,13 +384,13 @@ private final class MultiSegmentDownloader: NSObject {
 
     // MARK: - 响应头
 
-    private func prepareHeader(totalSize: Int64?) {
+    private func prepareHeader(totalSize: Int64?) -> Bool {
         var h = "HTTP/1.1 206 X\r\n"
         if let ct = contentType { h += "Content-Type: \(ct)\r\n" }
         if let total = totalSize, total > 0 {
             if requestStart >= total {
                 prepareHeader416()
-                return
+                return false
             }
             let actualLast: Int64
             if let e = explicitEnd {
@@ -367,12 +403,13 @@ private final class MultiSegmentDownloader: NSObject {
             h += "Content-Length: \(contentLength)\r\n"
         }
         h += "Accept-Ranges: bytes\r\n"
-        // CORS：允许 WKWebView 内 file:// 页面的 JS 跨源读取（MSE 播放器依赖）
+        // CORS：允许 WKWebView 内页面跨源读取（同源时无影响，跨源时生效）
         h += "Access-Control-Allow-Origin: *\r\n"
         h += "Access-Control-Expose-Headers: Content-Range, Accept-Ranges\r\n"
         h += "Connection: close\r\n\r\n"
         responseHeader = h
         headerPrepared = true
+        return true
     }
 
     private func prepareHeader416() {

@@ -115,12 +115,13 @@ final class LocalProxyServer {
         let path = String(parts[1])
 
         // MSE 播放器静态页面（同源加载，避免 file:// fetch 限制）
+        // 注意：xcodegen 会把 player/ 下的资源文件扁平打包到 bundle 根目录，故 subpath 用 nil
         if path == "/player.html" || path == "/player" || path == "/" {
-            serveBundleFile(connection, resource: "player.html", subpath: "player", mime: "text/html; charset=utf-8")
+            serveBundleFile(connection, resource: "player.html", mime: "text/html; charset=utf-8")
             return
         }
-        if path == "/mp4box.all.js" {
-            serveBundleFile(connection, resource: "mp4box.all.js", subpath: "player", mime: "application/javascript")
+        if path == "/mp4box.all.txt" {
+            serveBundleFile(connection, resource: "mp4box.all.txt", mime: "application/javascript")
             return
         }
 
@@ -180,9 +181,9 @@ final class LocalProxyServer {
         })
     }
 
-    /// 从 App bundle 返回静态资源（MSE 播放器页面与其依赖的 JS）
-    private func serveBundleFile(_ conn: NWConnection, resource: String, subpath: String, mime: String) {
-        guard let url = Bundle.main.url(forResource: resource, withExtension: nil, subdirectory: subpath),
+    /// 从 App bundle 根目录返回静态资源（MSE 播放器页面与其依赖的 JS）
+    private func serveBundleFile(_ conn: NWConnection, resource: String, mime: String) {
+        guard let url = Bundle.main.url(forResource: resource, withExtension: nil),
               let data = try? Data(contentsOf: url) else {
             sendSimple(conn, code: 404, body: "not found")
             return

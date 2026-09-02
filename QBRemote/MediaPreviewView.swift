@@ -846,7 +846,7 @@ struct HTML5VideoView: UIViewRepresentable {
         // 同源加载 MSE 播放器页面（本地代理提供 player.html + mp4box），避免 file:// fetch 限制
         if let base = LocalProxyServer.shared.baseURL, let url = URL(string: base + "player.html") {
             webView.load(URLRequest(url: url))
-        } else if let file = Bundle.main.url(forResource: "player", withExtension: "html", subdirectory: "player") {
+        } else if let file = Bundle.main.url(forResource: "player.html", withExtension: nil) {
             webView.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
         }
         return webView

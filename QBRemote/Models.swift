@@ -118,7 +118,7 @@ final class FileTreeNode: Identifiable, ObservableObject {
     let id = UUID()
     let name: String
     let isDirectory: Bool
-    let file: TorrentFile?
+    @Published var file: TorrentFile?
     @Published var children: [FileTreeNode] = []
     @Published var isExpanded = false
 

@@ -27,7 +27,7 @@ audio{width:92%;position:fixed;bottom:20px;left:4%}
   var errEl=document.getElementById('err');
   function status(s){ statusEl.style.display='block'; statusEl.textContent=s; }
   function hideStatus(){ statusEl.style.display='none'; }
-  function showErr(s){ try{video.pause();}catch(e){} video.style.display='none'; audio.style.display='none'; errEl.style.display='block'; errEl.innerHTML=s+'<div class="hint">如一直无法播放，请在 App 里点击右上角「更多」用其他播放器打开</div>'; }
+  function showErr(s){ try{video.pause();}catch(e){} video.style.display='none'; audio.style.display='none'; errEl.style.display='block'; var diag=''; try{ diag+='<br>MP4Box='+(typeof MP4Box!=='undefined'?'OK':'未加载')+' · MediaSource='+(typeof MediaSource!=='undefined'?'OK':'不支持')+' · 文件='+(fileSize>0?Math.round(fileSize/1048576)+'MB':'?'); }catch(e){} errEl.innerHTML=s+diag+'<div class="hint">如一直无法播放，请在 App 里点击右上角「更多」用其他播放器打开</div>'; }
 
   // ===== 配置 =====
   var HEAD_CHUNK  = 2 * 1024 * 1024;      // 头部下载量（需含 moov）
@@ -50,6 +50,19 @@ audio{width:92%;position:fixed;bottom:20px;left:4%}
       if(r.status!==206&&r.status!==200) throw new Error('HTTP '+r.status);
       return r;
     });
+  }
+
+  // ===== MSE 回退：单连接 <video>（本地代理多连接转发）=====
+  function fallbackToDirect(){
+    mseActive=false;
+    sessionAlive=false;
+    if(fallbackTimer){ clearTimeout(fallbackTimer); fallbackTimer=null; }
+    try{ if(sbV&&!sbV.updating&&sbV.buffered.length>0) sbV.remove(0, bufferedEnd(sbV)); }catch(e){}
+    try{ if(ms&&ms.readyState==='open') ms.endOfStream(); }catch(e){}
+    video.style.display='block';
+    video.src=currentUrl;
+    video.play().catch(function(){});
+    hideStatus();
   }
 
   // ===== 音频（单连接即可）=====
@@ -88,12 +101,15 @@ audio{width:92%;position:fixed;bottom:20px;left:4%}
   }
 
   function probe(){
-    return fetchRange(0,0).then(function(r){
-      var cr=r.headers.get('Content-Range')||'';
-      var m=cr.match(/\/(\d+)/);
-      if(m){ fileSize=parseInt(m[1],10); return; }
-      return r.arrayBuffer().then(function(b){ fileSize=b.byteLength; });
-    });
+    return Promise.race([
+      fetchRange(0,0).then(function(r){
+        var cr=r.headers.get('Content-Range')||'';
+        var m=cr.match(/\/(\d+)/);
+        if(m){ fileSize=parseInt(m[1],10); return; }
+        return r.arrayBuffer().then(function(b){ fileSize=b.byteLength; });
+      }),
+      new Promise(function(_, rej){ setTimeout(function(){ rej(new Error('探测超时(服务器可能不支持Range)')); }, 8000); })
+    ]);
   }
 
   function onReady(info){
@@ -262,6 +278,7 @@ audio{width:92%;position:fixed;bottom:20px;left:4%}
   function destroySession(){
     sessionAlive=false;
     downloading=false;
+    if(fallbackTimer){ clearTimeout(fallbackTimer); fallbackTimer=null; }
     try{
       if(sbV&&!sbV.updating&&sbV.buffered.length>0) sbV.remove(0, bufferedEnd(sbV));
       if(sbA&&!sbA.updating&&sbA.buffered.length>0) sbA.remove(0, bufferedEnd(sbA));

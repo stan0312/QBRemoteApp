@@ -203,7 +203,17 @@ struct TorrentDetailView: View {
 
     /// 按当前类型筛选重建目录树（文件默认按大小从大到小排列）
     private func rebuildTree() {
-        let sorted = displayFiles.sorted { $0.size > $1.size }
+        func typeRank(_ f: TorrentFile) -> Int {
+            if f.isImage { return 0 }
+            if f.isVideo { return 1 }
+            if f.isAudio { return 2 }
+            return 3
+        }
+        let sorted = displayFiles.sorted {
+            let r1 = typeRank($0), r2 = typeRank($1)
+            if r1 != r2 { return r1 < r2 }
+            return $0.size > $1.size
+        }
         let tree = FileTreeNode.buildTree(from: sorted)
         if tree.count <= 10 {
             setAll(tree, expanded: true)
@@ -260,10 +270,29 @@ struct TorrentDetailView: View {
     private func setPriority(ids: [Int], priority: Int) async {
         do {
             try await qb.setFilePriority(hash: torrent.hash, ids: ids, priority: priority)
-            await load()
+            // 仅本地更新优先级（不重载整个列表），避免勾选时列表滚动跳到顶部
+            let idSet = Set(ids)
+            for i in files.indices where idSet.contains(files[i].index) {
+                files[i].priority = priority
+            }
+            updateNodePriority(ids: idSet, priority: priority, nodes: treeNodes)
         } catch {
             opMessage = "设置失败: \(error.localizedDescription)"
             showOpMessage = true
+        }
+    }
+
+    /// 递归更新树中指定文件 id 的优先级（只更新节点，不重建树，保持列表滚动位置）
+    private func updateNodePriority(ids: Set<Int>, priority: Int, nodes: [FileTreeNode]) {
+        for n in nodes {
+            if let f = n.file, ids.contains(f.index) {
+                var nf = f
+                nf.priority = priority
+                n.file = nf
+            }
+            if !n.children.isEmpty {
+                updateNodePriority(ids: ids, priority: priority, nodes: n.children)
+            }
         }
     }
 

@@ -230,33 +230,38 @@ struct MediaItemView: View {
         }
     }
 
-    /// 创建免认证分享链接用于 HTML5 播放
-    /// v12：分享链接注册到本地代理（免认证转发 + CORS + 多连接分段），供 MSE 播放器 JS fetch
+    /// 创建 HTML5/MSE 播放的数据源并注册到本地代理
+    /// v13：直接用带认证的 /api/raw（Range 已验证支持，图片多连接满速成功），
+    /// 经本地代理多连接分段转发，供 MSE 播放器 JS fetch（同源），避免分享链接 Range 不确定
     private func createHtml5Share() {
         guard !htmlBusy else { return }
-        guard fb.token != nil else { htmlError = true; return }
+        guard let raw = rawURL else { DispatchQueue.main.async { self.htmlError = true }; return }
+        guard let token = fb.token else {
+            DispatchQueue.main.async { self.htmlError = true }
+            return
+        }
         htmlBusy = true
-        let rel = fb.fbRelativePath(savePath: torrent.save_path,
-                                    relativeName: file.name,
-                                    prefix: settings.pathPrefix)
-        Task {
-            do {
-                if let share = try await fb.createShare(relativePath: rel, hours: 24),
-                   let u = URL(string: share.url) {
-                    // 分享链接免认证，token 传 nil（本地代理不再附加 X-Auth）
-                    registerProxyNoAuth(u) { localURL in
-                        DispatchQueue.main.async {
-                            self.htmlURL = localURL
-                            self.htmlReady = true
-                        }
-                    }
-                } else {
-                    DispatchQueue.main.async { self.htmlError = true }
-                }
-            } catch {
-                DispatchQueue.main.async { self.htmlError = true }
+        LocalProxyServer.shared.start()
+        retryRegisterForHtml(target: raw, token: token, attempt: 0)
+    }
+
+    private func retryRegisterForHtml(target: URL, token: String, attempt: Int) {
+        if let local = LocalProxyServer.shared.register(targetURL: target, token: token),
+           let url = URL(string: local) {
+            DispatchQueue.main.async {
+                self.htmlURL = url
+                self.htmlReady = true
+                self.htmlBusy = false
             }
-            self.htmlBusy = false
+        } else if attempt < 30 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.retryRegisterForHtml(target: target, token: token, attempt: attempt + 1)
+            }
+        } else {
+            DispatchQueue.main.async {
+                self.htmlError = true
+                self.htmlBusy = false
+            }
         }
     }
 

@@ -503,7 +503,8 @@ struct MediaItemView: View {
         FileManager.default.createFile(atPath: fileURL.path, contents: nil)
         streamFileURL = fileURL
         let written = StreamWritten()
-        guard let localURL = LocalProxyServer.shared.registerLocalFile(fileURL: fileURL, total: total, written: written) else {
+        guard let localURLString = LocalProxyServer.shared.registerLocalFile(fileURL: fileURL, total: total, written: written),
+              let localURL = URL(string: localURLString) else {
             htmlError = true
             return
         }
@@ -529,8 +530,8 @@ struct MediaItemView: View {
                 if let data = data, !data.isEmpty {
                     writeQueue.async {
                         if let fh = try? FileHandle(forWritingTo: fileURL) {
-                            fh.seek(toOffset: UInt64(s))
-                            fh.write(data)
+                            try? fh.seek(toOffset: UInt64(s))
+                            try? fh.write(contentsOf: data)
                             try? fh.close()
                             written.set(e + 1)
                         }

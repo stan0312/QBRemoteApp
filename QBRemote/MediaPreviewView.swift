@@ -96,6 +96,11 @@ struct MediaItemView: View {
     @State private var htmlReady = false
     @State private var htmlError = false
     @State private var htmlBusy = false
+    @State private var downloadProgress: Double = 0
+    @State private var isDownloading = false
+    @State private var activeTasks: [URLSessionDataTask] = []
+    @State private var largeFileTotal: Int64 = 0
+    @State private var showLargeFileAlert = false
 
     private var rawURL: URL? {
         fb.rawURL(savePath: torrent.save_path, relativeName: file.name, prefix: settings.pathPrefix)
@@ -128,6 +133,18 @@ struct MediaItemView: View {
                 VLCFullScreenPlayer(player: p)
             }
         }
+        .alert("文件较大", isPresented: $showLargeFileAlert) {
+            Button("继续下载") {
+                if let url = rawURL, let token = fb.token {
+                    downloadSegments(url: url, token: token, total: largeFileTotal)
+                }
+            }
+            Button("取消", role: .cancel) {
+                cancelDownload()
+            }
+        } message: {
+            Text("该文件约 \(ByteCountFormatter.string(fromByteCount: largeFileTotal, countStyle: .file))，下载完成后播放。继续吗？")
+        }
     }
 
     /// 视频全屏按钮（图片/音频不显示）
@@ -148,14 +165,58 @@ struct MediaItemView: View {
         }
     }
 
+    /// 下载进度界面（多连接满速下载中）
+    @ViewBuilder
+    private var downloadProgressContent: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .tint(.white)
+                .scaleEffect(1.4)
+            Text("正在满速下载，完成后自动播放…")
+                .font(.subheadline)
+                .foregroundColor(.white)
+            Text("多连接并发下载 · 已下载 \(Int(downloadProgress * 100))%")
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.6))
+            Button {
+                cancelDownload()
+            } label: {
+                Text("取消")
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.2))
+                    .cornerRadius(8)
+            }
+        }
+    }
+
     @ViewBuilder
     private var content: some View {
         if file.isImage {
             imageContent
-        } else if isHtml5Playable {
-            html5Content
+        } else if isDownloading {
+            downloadProgressContent
         } else if file.isVideo {
-            htmlErrorContent
+            if let p = avPlayer {
+                VideoPlayer(player: p)
+                    .ignoresSafeArea()
+            } else if let p = vlcPlayer, vlcReady {
+                VLCPlayerView(player: p)
+                    .ignoresSafeArea()
+            } else {
+                VStack(spacing: 14) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 44))
+                        .foregroundColor(.orange)
+                    Text("播放失败")
+                        .foregroundColor(.white)
+                }
+            }
+        } else if file.isAudio, audioPlayer != nil {
+            audioContent
+        } else {
+            Color.black
         }
     }
 
@@ -396,12 +457,143 @@ struct MediaItemView: View {
         guard let url = rawURL else { return }
         if file.isImage {
             loadImage(url: url)
-        } else if isHtml5Playable {
-            createHtml5Share()
+        } else if file.isVideo || file.isAudio {
+            // v14：iPhone（iOS 16.2）无 MSE，HTML5 流式方案不可用。
+            // 改为多连接分段下载到本地，再交给 AVPlayer/VLC 播放：
+            // 满速（绕单连接限速）、兼容所有格式、下载期间显示进度不再白屏。
+            startSegmentDownload(url: url)
         } else {
-            // iOS 的 HTML5 播放器不支持 mkv/avi/wmv/flv/webm 等格式
             htmlError = true
         }
+    }
+
+    // MARK: - 多连接下载 + 本地播放（v14，iOS 16 无 MSE 的替代方案）
+
+    private func startSegmentDownload(url: URL) {
+        guard let token = fb.token else { htmlError = true; return }
+        isDownloading = true
+        downloadProgress = 0
+        var probe = URLRequest(url: url)
+        probe.setValue(token, forHTTPHeaderField: "X-Auth")
+        probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        URLSession.shared.dataTask(with: probe) { [weak self] _, resp, _ in
+            var total: Int64 = -1
+            if let http = resp as? HTTPURLResponse, http.statusCode == 206,
+               let cr = http.value(forHTTPHeaderField: "Content-Range"),
+               let last = cr.split(separator: "/").last, let t = Int64(last) {
+                total = t
+            }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if total <= 0 {
+                    self.downloadSingle(url: url, token: token)
+                } else if total > 500 * 1024 * 1024 {
+                    self.largeFileTotal = total
+                    self.showLargeFileAlert = true
+                } else {
+                    self.downloadSegments(url: url, token: token, total: total)
+                }
+            }
+        }.resume()
+    }
+
+    private func downloadSegments(url: URL, token: String, total: Int64) {
+        let parts = 8
+        let segSize = (total + Int64(parts) - 1) / Int64(parts)
+        var datas: [Int: Data] = [:]
+        let lock = NSLock()
+        let group = DispatchGroup()
+        for i in 0..<parts {
+            let start = Int64(i) * segSize
+            let end = min(start + segSize - 1, total - 1)
+            guard start <= end else { continue }
+            group.enter()
+            var req = URLRequest(url: url)
+            req.setValue(token, forHTTPHeaderField: "X-Auth")
+            req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+            let task = URLSession.shared.dataTask(with: req) { data, _, _ in
+                defer { group.leave() }
+                if let data = data {
+                    lock.lock(); datas[i] = data; lock.unlock()
+                }
+                DispatchQueue.main.async {
+                    var done = 0
+                    lock.lock(); done = datas.count; lock.unlock()
+                    self.downloadProgress = min(1, Double(done) / Double(parts))
+                }
+            }
+            activeTasks.append(task)
+            task.resume()
+        }
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            var merged = Data()
+            var ok = true
+            for i in 0..<parts {
+                if let d = datas[i] { merged.append(d) } else { ok = false }
+            }
+            if !ok || merged.isEmpty {
+                self.htmlError = true
+                return
+            }
+            self.isDownloading = false
+            self.writeAndPlay(data: merged)
+        }
+    }
+
+    private func downloadSingle(url: URL, token: String) {
+        var req = URLRequest(url: url)
+        req.setValue(token, forHTTPHeaderField: "X-Auth")
+        let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let data = data, !data.isEmpty {
+                    self.isDownloading = false
+                    self.writeAndPlay(data: data)
+                } else {
+                    self.htmlError = true
+                }
+            }
+        }
+        activeTasks.append(task)
+        task.resume()
+    }
+
+    private func writeAndPlay(data: Data) {
+        let ext = file.fileExtension.isEmpty ? "mp4" : file.fileExtension
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + "." + ext)
+        do {
+            try data.write(to: dest)
+            playLocal(fileURL: dest)
+        } catch {
+            htmlError = true
+        }
+    }
+
+    private func playLocal(fileURL: URL) {
+        if file.isAudio {
+            let p = AVPlayer(url: fileURL)
+            audioPlayer = p
+            p.play()
+        } else if isNativePlayable {
+            let p = AVPlayer(url: fileURL)
+            avPlayer = p
+            p.play()
+        } else {
+            let p = VLCMediaPlayer()
+            p.media = VLCMedia(url: fileURL)
+            vlcPlayer = p
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self.vlcReady = true
+            }
+        }
+    }
+
+    private func cancelDownload() {
+        for t in activeTasks { t.cancel() }
+        activeTasks.removeAll()
+        isDownloading = false
     }
 
     private func startNative(url: URL, isAudio: Bool) {

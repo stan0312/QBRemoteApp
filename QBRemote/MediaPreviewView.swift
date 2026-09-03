@@ -101,6 +101,8 @@ struct MediaItemView: View {
     @State private var activeTasks: [URLSessionDataTask] = []
     /// 边下边播的本地临时文件（onDisappear 时删除）
     @State private var streamFileURL: URL?
+    /// 边下边播失败诊断信息（连接不上/0 进度超时等）
+    @State private var streamError: String?
 
     private var rawURL: URL? {
         fb.rawURL(savePath: torrent.save_path, relativeName: file.name, prefix: settings.pathPrefix)
@@ -175,10 +177,10 @@ struct MediaItemView: View {
             ProgressView()
                 .tint(.white)
                 .scaleEffect(1.4)
-            Text("正在满速下载，完成后自动播放…")
+            Text("正在准备播放…")
                 .font(.subheadline)
                 .foregroundColor(.white)
-            Text("多连接并发下载 · 已下载 \(Int(downloadProgress * 100))%")
+            Text("多连接并发 · 已缓冲 \(Int(downloadProgress * 100))%")
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.6))
             Button {
@@ -194,30 +196,79 @@ struct MediaItemView: View {
         }
     }
 
+    /// 边下边播：播放器下方的缓冲进度小条
+    @ViewBuilder
+    private var progressOverlay: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 8) {
+                ProgressView()
+                    .tint(.white)
+                Text("边下边播 · 已缓冲 \(Int(downloadProgress * 100))%")
+                    .font(.caption)
+                    .foregroundColor(.white)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.55))
+            .cornerRadius(8)
+            .padding(.bottom, 12)
+        }
+    }
+
+    /// 错误提示
+    @ViewBuilder
+    private func errorContent(_ msg: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 44))
+                .foregroundColor(.orange)
+            Text(msg)
+                .font(.subheadline)
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+        }
+    }
+
     @ViewBuilder
     private var content: some View {
         if file.isImage {
             imageContent
-        } else if isDownloading {
-            downloadProgressContent
         } else if file.isVideo {
+            // 边下边播：播放器一旦就绪立即显示，下载进度作为底部小条叠加（不再挡住播放画面）
             if let p = avPlayer {
-                VideoPlayer(player: p)
-                    .ignoresSafeArea()
-            } else if let p = vlcPlayer, vlcReady {
-                VLCPlayerView(player: p)
-                    .ignoresSafeArea()
-            } else {
-                VStack(spacing: 14) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 44))
-                        .foregroundColor(.orange)
-                    Text("播放失败")
-                        .foregroundColor(.white)
+                ZStack {
+                    VideoPlayer(player: p)
+                        .ignoresSafeArea()
+                    if isDownloading { progressOverlay }
                 }
+            } else if let p = vlcPlayer, vlcReady {
+                ZStack {
+                    VLCPlayerView(player: p)
+                        .ignoresSafeArea()
+                    if isDownloading { progressOverlay }
+                }
+            } else if let err = streamError {
+                errorContent(err)
+            } else if isDownloading {
+                downloadProgressContent
+            } else {
+                errorContent("播放失败")
             }
-        } else if file.isAudio, audioPlayer != nil {
-            audioContent
+        } else if file.isAudio {
+            if let p = audioPlayer {
+                ZStack {
+                    audioContent
+                    if isDownloading { progressOverlay }
+                }
+            } else if let err = streamError {
+                errorContent(err)
+            } else if isDownloading {
+                downloadProgressContent
+            } else {
+                Color.black
+            }
         } else {
             Color.black
         }
@@ -473,7 +524,7 @@ struct MediaItemView: View {
     // MARK: - 边下边播（v15，iOS 16 无 MSE 的替代方案）
 
     private func startStreamingDownload(url: URL) {
-        guard let token = fb.token else { htmlError = true; return }
+        guard let token = fb.token else { streamError = "FileBrowser 未登录，请返回重连"; return }
         isDownloading = true
         downloadProgress = 0
         var probe = URLRequest(url: url)
@@ -505,7 +556,7 @@ struct MediaItemView: View {
         let written = StreamWritten()
         guard let localURLString = LocalProxyServer.shared.registerLocalFile(fileURL: fileURL, total: total, written: written),
               let localURL = URL(string: localURLString) else {
-            htmlError = true
+            streamError = "本地代理未就绪，请重试"
             return
         }
         // 多连接并发下载，段 0（头部）与最后一段（尾部）优先，保证 moov 无论位置都能快速就绪
@@ -556,6 +607,13 @@ struct MediaItemView: View {
             self.isDownloading = false
             written.set(total)
         }
+        // 诊断：6 秒内 0 进度 → 判定连不上 FileBrowser，给出明确错误而非永远卡 0%
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+            if self.isDownloading && self.downloadProgress <= 0 && self.streamError == nil {
+                self.cancelDownload()
+                self.streamError = "无法连接 FileBrowser 下载数据（6 秒内 0 进度）。\n请检查设置里的 FileBrowser 地址，或局域网开关填写的内网 IP 是否正确。"
+            }
+        }
         // 立即开始播放（秒开：本地代理从已下载部分按需供给）
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             if self.file.isAudio {
@@ -592,7 +650,7 @@ struct MediaItemView: View {
                     self.isDownloading = false
                     self.playLocal(fileURL: dest)
                 } else {
-                    self.htmlError = true
+                    self.streamError = "文件下载失败，请检查网络连接与 FileBrowser 地址"
                 }
             }
         }
@@ -692,6 +750,7 @@ struct MediaItemView: View {
         htmlReady = false
         htmlError = false
         htmlBusy = false
+        streamError = nil
         cancelDownload()
         if let url = streamFileURL {
             try? FileManager.default.removeItem(at: url)

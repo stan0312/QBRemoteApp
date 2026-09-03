@@ -265,9 +265,13 @@ final class LocalProxyServer {
             return
         }
         defer { try? fh.close() }
-        fh.seek(toOffset: UInt64(start))
+        try? fh.seek(toOffset: UInt64(start))
         let len = availEnd - start + 1
-        let data = fh.readData(ofLength: Int(min(len, 4 * 1024 * 1024))) // 单次最多 4MB，避免大块阻塞
+        let data = (try? fh.read(upToCount: Int(min(len, 4 * 1024 * 1024)))) ?? nil // 单次最多 4MB
+        guard let data = data else {
+            sendSimple(conn, code: 500, body: "read failed")
+            return
+        }
         if data.isEmpty {
             sendSimple(conn, code: 500, body: "read failed")
             return

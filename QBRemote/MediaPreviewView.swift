@@ -476,7 +476,7 @@ struct MediaItemView: View {
         var probe = URLRequest(url: url)
         probe.setValue(token, forHTTPHeaderField: "X-Auth")
         probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-        URLSession.shared.dataTask(with: probe) { [weak self] _, resp, _ in
+        URLSession.shared.dataTask(with: probe) { _, resp, _ in
             var total: Int64 = -1
             if let http = resp as? HTTPURLResponse, http.statusCode == 206,
                let cr = http.value(forHTTPHeaderField: "Content-Range"),
@@ -484,7 +484,6 @@ struct MediaItemView: View {
                 total = t
             }
             DispatchQueue.main.async {
-                guard let self = self else { return }
                 if total <= 0 {
                     self.downloadSingle(url: url, token: token)
                 } else if total > 500 * 1024 * 1024 {
@@ -525,8 +524,7 @@ struct MediaItemView: View {
             activeTasks.append(task)
             task.resume()
         }
-        group.notify(queue: .main) { [weak self] in
-            guard let self = self else { return }
+        group.notify(queue: .main) {
             var merged = Data()
             var ok = true
             for i in 0..<parts {
@@ -544,9 +542,8 @@ struct MediaItemView: View {
     private func downloadSingle(url: URL, token: String) {
         var req = URLRequest(url: url)
         req.setValue(token, forHTTPHeaderField: "X-Auth")
-        let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+        let task = URLSession.shared.dataTask(with: req) { data, _, _ in
             DispatchQueue.main.async {
-                guard let self = self else { return }
                 if let data = data, !data.isEmpty {
                     self.isDownloading = false
                     self.writeAndPlay(data: data)

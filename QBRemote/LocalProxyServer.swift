@@ -1,6 +1,26 @@
 import Foundation
 import Network
 
+/// 边下边播的共享写入进度（下载线程写入、代理线程读取，线程安全）
+final class StreamWritten {
+    private let lock = NSLock()
+    private var value: Int64 = 0
+    /// 记录已写入文件的字节数（取最大值，防止乱序覆盖回退）
+    func set(_ v: Int64) {
+        lock.lock(); if v > value { value = v }; lock.unlock()
+    }
+    func get() -> Int64 {
+        lock.lock(); defer { lock.unlock() }; return value
+    }
+}
+
+/// 本地文件流会话：代理从一个「正在被多连接下载填充」的本地文件读取 Range 给播放器
+struct LocalFileStream {
+    let fileURL: URL
+    let total: Int64
+    let written: StreamWritten
+}
+
 /// 本地 HTTP 代理服务器（多连接分段 + 流式加速版）
 ///
 /// 用途：filebrowser 的文件流需要 X-Auth 认证，且返回的 Content-Type 是 application/octet-stream，
@@ -23,6 +43,8 @@ final class LocalProxyServer {
     private var port: UInt16 = 0
     /// 会话 key -> (上游 URL, X-Auth token，nil 表示免认证的分享链接)
     private var sessions: [String: (URL, String?)] = [:]
+    /// 本地文件流会话：key -> (正在被下载填充的本地文件)
+    private var fileSessions: [String: LocalFileStream] = [:]
     /// 进行中的下载引擎（URLSession delegate 是弱引用，需强持有到完成）
     private var activeEngines: [MultiSegmentDownloader] = []
     private let queue = DispatchQueue(label: "qb.localproxy")
@@ -62,6 +84,19 @@ final class LocalProxyServer {
             guard port != 0 else { result = nil; return }
             let key = UUID().uuidString
             sessions[key] = (targetURL, token)
+            result = "http://127.0.0.1:\(port)/stream?k=\(key)"
+        }
+        return result
+    }
+
+    /// 注册一个「边下边播」的本地文件流：播放器请求本地 URL 时，代理从 fileURL 读取
+    /// Range 返回；尚未下载到的部分会等待（written 由下载线程持续推进），实现秒开播放。
+    func registerLocalFile(fileURL: URL, total: Int64, written: StreamWritten) -> String? {
+        var result: String?
+        queue.sync {
+            guard port != 0 else { result = nil; return }
+            let key = UUID().uuidString
+            fileSessions[key] = LocalFileStream(fileURL: fileURL, total: total, written: written)
             result = "http://127.0.0.1:\(port)/stream?k=\(key)"
         }
         return result
@@ -143,8 +178,15 @@ final class LocalProxyServer {
         }
 
         guard let comps = URLComponents(string: "http://x" + path),
-              let k = comps.queryItems?.first(where: { $0.name == "k" })?.value,
-              let session = sessions[k] else {
+              let k = comps.queryItems?.first(where: { $0.name == "k" })?.value else {
+            sendSimple(connection, code: 404, body: "not found")
+            return
+        }
+        if let fs = fileSessions[k] {
+            serveLocalFile(connection, stream: fs, start: rangeStart, end: rangeEnd)
+            return
+        }
+        guard let session = sessions[k] else {
             sendSimple(connection, code: 404, body: "not found")
             return
         }
@@ -190,6 +232,54 @@ final class LocalProxyServer {
         }
         let header = "HTTP/1.1 200 OK\r\nContent-Type: \(mime)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
         var payload = Data(header.utf8)
+        payload.append(data)
+        conn.send(content: payload, completion: .contentProcessed { _ in
+            conn.cancel()
+        })
+    }
+
+    // MARK: - 边下边播：从正在下载填充的本地文件读 Range
+
+    private func serveLocalFile(_ conn: NWConnection, stream: LocalFileStream, start: Int64, end: Int64?, waitCount: Int = 0) {
+        let total = stream.total
+        guard start < total else {
+            sendSimple(conn, code: 416, body: "range not satisfiable")
+            return
+        }
+        let targetEnd = min(end ?? (total - 1), total - 1)
+        // 等 start 之前的数据下载到本地（异步重试，不阻塞代理队列）
+        if stream.written.get() < start {
+            if waitCount >= 300 { // 30s 超时
+                sendSimple(conn, code: 500, body: "download timeout")
+                return
+            }
+            queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.serveLocalFile(conn, stream: stream, start: start, end: end, waitCount: waitCount + 1)
+            }
+            return
+        }
+        // 渐进式：返回「已就绪前缀」，AVPlayer 会继续请求剩余部分
+        let availEnd = min(targetEnd, stream.written.get())
+        guard let fh = try? FileHandle(forReadingFrom: stream.fileURL) else {
+            sendSimple(conn, code: 500, body: "open failed")
+            return
+        }
+        defer { try? fh.close() }
+        fh.seek(toOffset: UInt64(start))
+        let len = availEnd - start + 1
+        let data = fh.readData(ofLength: Int(min(len, 4 * 1024 * 1024))) // 单次最多 4MB，避免大块阻塞
+        if data.isEmpty {
+            sendSimple(conn, code: 500, body: "read failed")
+            return
+        }
+        var h = "HTTP/1.1 206 X\r\n"
+        if let ct = Self.mimeType(for: stream.fileURL) { h += "Content-Type: \(ct)\r\n" }
+        h += "Content-Range: bytes \(start)-\(start + Int64(data.count) - 1)/\(total)\r\n"
+        h += "Content-Length: \(data.count)\r\n"
+        h += "Accept-Ranges: bytes\r\n"
+        h += "Access-Control-Allow-Origin: *\r\n"
+        h += "Connection: close\r\n\r\n"
+        var payload = Data(h.utf8)
         payload.append(data)
         conn.send(content: payload, completion: .contentProcessed { _ in
             conn.cancel()

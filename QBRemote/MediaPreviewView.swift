@@ -517,11 +517,11 @@ struct MediaItemView: View {
 
     private func start() {
         guard let url = rawURL else {
-            AppLog("Preview", "无法生成远程 URL：save_path=\(torrent.save_path) name=\(file.name) prefix=\(settings.pathPrefix)")
+            Log("Preview", "无法生成远程 URL：save_path=\(torrent.save_path) name=\(file.name) prefix=\(settings.pathPrefix)")
             return
         }
-        AppLog("Preview", "打开文件「\(file.name)」扩展名=\(file.fileExtension) 类型=\(file.isImage ? "图片" : (file.isVideo ? "视频" : (file.isAudio ? "音频" : "其他")))")
-        AppLog("Preview", "远程 URL=\(url.absoluteString)")
+        Log("Preview", "打开文件「\(file.name)」扩展名=\(file.fileExtension) 类型=\(file.isImage ? "图片" : (file.isVideo ? "视频" : (file.isAudio ? "音频" : "其他")))")
+        Log("Preview", "远程 URL=\(url.absoluteString)")
         if file.isImage {
             loadImage(url: url)
         } else if file.isVideo || file.isAudio {
@@ -530,7 +530,7 @@ struct MediaItemView: View {
             // 按需供给 AVPlayer/VLC —— 点开即播、后台满速下载、兼容所有格式。
             startStreamingDownload(url: url)
         } else {
-            AppLog("Preview", "不支持的文件类型，显示错误")
+            Log("Preview", "不支持的文件类型，显示错误")
             htmlError = true
         }
     }
@@ -542,7 +542,7 @@ struct MediaItemView: View {
         isDownloading = true
         downloadProgress = 0
         singleFallback = false
-        AppLog("Preview", "视频探针开始: \(url.absoluteString)")
+        Log("Preview", "视频探针开始: \(url.absoluteString)")
         var probe = URLRequest(url: url)
         probe.setValue(token, forHTTPHeaderField: "X-Auth")
         probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
@@ -550,7 +550,7 @@ struct MediaItemView: View {
             DispatchQueue.main.async {
                 guard let http = resp as? HTTPURLResponse else {
                     // 请求级失败：地址不可达 / 端口未开放 / 网络错误
-                    AppLog("Preview", "探针失败(无 HTTP 响应) err=\(err?.localizedDescription ?? "未知") —— 判定 FileBrowser 8033 端口不通或地址错误")
+                    Log("Preview", "探针失败(无 HTTP 响应) err=\(err?.localizedDescription ?? "未知") —— 判定 FileBrowser 8033 端口不通或地址错误")
                     self.isDownloading = false
                     self.streamError = "无法连接 FileBrowser（\(err?.localizedDescription ?? "网络错误")）。\n请确认 FileBrowser 的 8033 端口已在路由器对外开放，或检查设置里的地址。"
                     return
@@ -559,14 +559,14 @@ struct MediaItemView: View {
                    let cr = http.value(forHTTPHeaderField: "Content-Range"),
                    let last = cr.split(separator: "/").last, let t = Int64(last), t > 0 {
                     // 正常支持 Range → 8 段并发边下边播
-                    AppLog("Preview", "探针 206 支持 Range, Content-Range=\(cr) total=\(t) → 8 段并发")
+                    Log("Preview", "探针 206 支持 Range, Content-Range=\(cr) total=\(t) → 8 段并发")
                     self.startStreaming(url: url, token: token, total: t)
                 } else if http.statusCode == 200 {
                     // 服务器忽略了 Range 请求、整返文件 → 单连接整下兜底
-                    AppLog("Preview", "探针返回 200(忽略 Range) → 单连接整下兜底")
+                    Log("Preview", "探针返回 200(忽略 Range) → 单连接整下兜底")
                     self.downloadStreamSingle(url: url, token: token)
                 } else {
-                    AppLog("Preview", "探针返回 HTTP \(http.statusCode) → 报错")
+                    Log("Preview", "探针返回 HTTP \(http.statusCode) → 报错")
                     self.isDownloading = false
                     self.streamError = "FileBrowser 返回错误（HTTP \(http.statusCode)）。\n请检查文件是否存在、账号是否有权限，或端口是否正确。"
                 }
@@ -581,10 +581,10 @@ struct MediaItemView: View {
         FileManager.default.createFile(atPath: fileURL.path, contents: nil)
         streamFileURL = fileURL
         let written = StreamWritten()
-        AppLog("Preview", "8 段并发开始 total=\(total) 临时文件=\(fileURL.lastPathComponent)")
+        Log("Preview", "8 段并发开始 total=\(total) 临时文件=\(fileURL.lastPathComponent)")
         guard let localURLString = LocalProxyServer.shared.registerLocalFile(fileURL: fileURL, total: total, written: written),
               let localURL = URL(string: localURLString) else {
-            AppLog("Preview", "本地代理注册失败 → 报错")
+            Log("Preview", "本地代理注册失败 → 报错")
             streamError = "本地代理未就绪，请重试"
             return
         }
@@ -639,7 +639,7 @@ struct MediaItemView: View {
         // 诊断：6 秒内 0 进度 → 判定连不上 FileBrowser，给出明确错误而非永远卡 0%
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
             if self.isDownloading && self.downloadProgress <= 0 && self.streamError == nil {
-                AppLog("Preview", "6 秒内 0 进度 → 触发超时诊断，取消下载")
+                Log("Preview", "6 秒内 0 进度 → 触发超时诊断，取消下载")
                 self.cancelDownload()
                 self.streamError = "无法连接 FileBrowser 下载数据（6 秒内 0 进度）。\n请检查设置里的 FileBrowser 地址，或局域网开关填写的内网 IP 是否正确。"
             }
@@ -676,7 +676,7 @@ struct MediaItemView: View {
         let task = URLSession.shared.dataTask(with: req) { data, resp, err in
             DispatchQueue.main.async {
                 if let data = data, !data.isEmpty {
-                    AppLog("Preview", "单连接整下完成 字节=\(data.count)")
+                    Log("Preview", "单连接整下完成 字节=\(data.count)")
                     let ext = self.file.fileExtension.isEmpty ? "mp4" : self.file.fileExtension
                     let dest = FileManager.default.temporaryDirectory
                         .appendingPathComponent(UUID().uuidString + "." + ext)
@@ -685,7 +685,7 @@ struct MediaItemView: View {
                     self.isDownloading = false
                     self.playLocal(fileURL: dest)
                 } else {
-                    AppLog("Preview", "单连接整下失败 err=\(err?.localizedDescription ?? "空数据/未知")")
+                    Log("Preview", "单连接整下失败 err=\(err?.localizedDescription ?? "空数据/未知")")
                     self.isDownloading = false
                     self.streamError = "文件下载失败：\(err?.localizedDescription ?? "请检查 FileBrowser 地址与端口")"
                 }
@@ -696,7 +696,7 @@ struct MediaItemView: View {
         // 诊断：20 秒未完成且无错误 → 远程链路慢/异常，给出可操作提示
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
             if self.isDownloading && self.streamError == nil {
-                AppLog("Preview", "单连接整下 20 秒未完成 → 触发超时诊断")
+                Log("Preview", "单连接整下 20 秒未完成 → 触发超时诊断")
                 self.cancelDownload()
                 self.streamError = "远程下载超时（20 秒）。\n该视频的下载地址不支持分段加速，请检查 FileBrowser 的 8033 端口是否已对外开放，或改用局域网地址。"
             }
@@ -704,7 +704,7 @@ struct MediaItemView: View {
     }
 
     private func playLocal(fileURL: URL) {
-        AppLog("Preview", "开始本地播放 文件=\(fileURL.lastPathComponent) 类型=\(file.isAudio ? "音频" : (isNativePlayable ? "AVPlayer 原生" : "VLC"))")
+        Log("Preview", "开始本地播放 文件=\(fileURL.lastPathComponent) 类型=\(file.isAudio ? "音频" : (isNativePlayable ? "AVPlayer 原生" : "VLC"))")
         if file.isAudio {
             let p = AVPlayer(url: fileURL)
             audioPlayer = p
@@ -806,7 +806,7 @@ struct MediaItemView: View {
 
     private func loadImage(url: URL) {
         guard let token = fb.token else { imageError = true; return }
-        AppLog("Preview", "图片探测开始: \(url.absoluteString)")
+        Log("Preview", "图片探测开始: \(url.absoluteString)")
         // 先探测文件总大小（Range 请求拿 Content-Range），支持则走多连接并发下载（绕单连接限速）
         var probe = URLRequest(url: url)
         probe.setValue(token, forHTTPHeaderField: "X-Auth")
@@ -826,9 +826,9 @@ struct MediaItemView: View {
                 }
             }
             DispatchQueue.main.async {
-                AppLog("Preview", "图片探针结果 HTTP=\(code) Content-Range=\(range) total=\(total) err=\(err?.localizedDescription ?? "无")")
+                Log("Preview", "图片探针结果 HTTP=\(code) Content-Range=\(range) total=\(total) err=\(err?.localizedDescription ?? "无")")
                 if total <= 0 {
-                    AppLog("Preview", "图片不支持 Range(或请求失败) → 单连接整下")
+                    Log("Preview", "图片不支持 Range(或请求失败) → 单连接整下")
                     self.loadImageSingle(url: url)
                 } else {
                     self.downloadImageSegments(url: url, token: token, total: total)
@@ -872,9 +872,9 @@ struct MediaItemView: View {
                         lock.lock(); datas[i] = data; lock.unlock()
                         return
                     }
-                    AppLog("Preview", "图片段 \(i) 区间校验不符: HTTP=\(http.statusCode) CR=\(cr) 请求=[\(start)-\(end)] 收到字节=\(data.count)")
+                    Log("Preview", "图片段 \(i) 区间校验不符: HTTP=\(http.statusCode) CR=\(cr) 请求=[\(start)-\(end)] 收到字节=\(data.count)")
                 } else {
-                    AppLog("Preview", "图片段 \(i) 非 206 响应(HTTP=\((resp as? HTTPURLResponse)?.statusCode ?? 0)) → 回退单连接")
+                    Log("Preview", "图片段 \(i) 非 206 响应(HTTP=\((resp as? HTTPURLResponse)?.statusCode ?? 0)) → 回退单连接")
                 }
                 // 任何一段不是标准的 206 区间响应 → 放弃分段，回退单连接
                 failed = true
@@ -882,7 +882,7 @@ struct MediaItemView: View {
         }
         group.notify(queue: .main) {
             if failed {
-                AppLog("Preview", "图片分段下载失败 → 回退单连接整下")
+                Log("Preview", "图片分段下载失败 → 回退单连接整下")
                 self.loadImageSingle(url: url)
                 return
             }
@@ -890,7 +890,7 @@ struct MediaItemView: View {
             for i in 0..<parts {
                 if let d = datas[i] { merged.append(d) }
             }
-            AppLog("Preview", "图片 4 段合并完成 字节=\(merged.count)")
+            Log("Preview", "图片 4 段合并完成 字节=\(merged.count)")
             if merged.isEmpty {
                 self.imageError = true
             } else {
@@ -902,16 +902,16 @@ struct MediaItemView: View {
     /// 单连接整下（无 Range 支持或分段失败时回退）
     private func loadImageSingle(url: URL) {
         guard let token = fb.token else { imageError = true; return }
-        AppLog("Preview", "图片单连接整下开始")
+        Log("Preview", "图片单连接整下开始")
         var req = URLRequest(url: url)
         req.setValue(token, forHTTPHeaderField: "X-Auth")
         URLSession.shared.dataTask(with: req) { data, _, err in
             DispatchQueue.main.async {
                 if let data = data {
-                    AppLog("Preview", "图片单连接完成 字节=\(data.count)")
+                    Log("Preview", "图片单连接完成 字节=\(data.count)")
                     self.decodeImage(data: data)
                 } else {
-                    AppLog("Preview", "图片单连接失败 err=\(err?.localizedDescription ?? "空数据/未知")")
+                    Log("Preview", "图片单连接失败 err=\(err?.localizedDescription ?? "空数据/未知")")
                     self.imageError = true
                 }
             }
@@ -925,7 +925,7 @@ struct MediaItemView: View {
         } else if let img = UIImage(data: data) {
             self.image = img
         } else {
-            AppLog("Preview", "图片解码失败(字节=\(data.count) 扩展名=\(self.file.fileExtension)) → 显示错误")
+            Log("Preview", "图片解码失败(字节=\(data.count) 扩展名=\(self.file.fileExtension)) → 显示错误")
             self.imageError = true
         }
     }

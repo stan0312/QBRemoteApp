@@ -51,7 +51,7 @@ final class AppLog {
     }
 }
 
-/// 全局便捷日志函数（内部统一走 AppLog.shared）
-func AppLog(_ tag: String, _ message: String) {
+/// 全局便捷日志函数（与类型名 AppLog 区分，避免重声明冲突）
+func Log(_ tag: String, _ message: String) {
     AppLog.shared.log(tag, message)
 }

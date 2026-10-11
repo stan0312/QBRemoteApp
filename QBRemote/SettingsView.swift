@@ -50,6 +50,12 @@ struct SettingsView: View {
                     }
                 }
 
+                Section(header: Text("诊断")) {
+                    NavigationLink(destination: LogView()) {
+                        Label("调试日志", systemImage: "doc.text.magnifyingglass")
+                    }
+                }
+
                 Section {
                     Button(action: {
                         settings.save()
@@ -69,5 +75,6 @@ struct SettingsView: View {
                 }
             }
         }
+        .edgeSwipeDismiss { dismiss() }
     }
 }

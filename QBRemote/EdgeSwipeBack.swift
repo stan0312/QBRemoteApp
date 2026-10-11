@@ -28,7 +28,7 @@ extension UINavigationController: UIGestureRecognizerDelegate {
     }
 }
 
-/// 屏幕左缘右滑检测器（UIKit 边缘手势，系统优先级高，专用于全屏预览关闭）
+/// 屏幕左缘右滑检测器（挂载于 overlay 左缘区域，独占该区域触摸，不与 TabView 中间翻页冲突）
 struct EdgePanCloseDetector: UIViewRepresentable {
     let action: () -> Void
 
@@ -39,10 +39,12 @@ struct EdgePanCloseDetector: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let view = UIView(frame: .zero)
         view.backgroundColor = .clear
-        let pan = UIScreenEdgePanGestureRecognizer(target: context.coordinator,
-                                                   action: #selector(Coordinator.handle(_:)))
-        pan.edges = .left
+        // 用 UIPanGestureRecognizer + 手动判定起点在左缘，避免 UIScreenEdgePan 在 SwiftUI
+        // hosting 层偶发不触发的问题；同时 overlay 独占左缘 44pt 触摸，不会抢 TabView 中间翻页。
+        let pan = UIPanGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handle(_:)))
         pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 1
         view.addGestureRecognizer(pan)
         return view
     }
@@ -51,11 +53,23 @@ struct EdgePanCloseDetector: UIViewRepresentable {
 
     final class Coordinator: NSObject {
         let action: () -> Void
+        private var startX: CGFloat = -1
         init(action: @escaping () -> Void) { self.action = action }
 
-        @objc func handle(_ gesture: UIScreenEdgePanGestureRecognizer) {
-            if gesture.state == .ended {
-                action()
+        @objc func handle(_ gesture: UIPanGestureRecognizer) {
+            switch gesture.state {
+            case .began:
+                startX = gesture.location(in: gesture.view).x
+            case .ended, .cancelled:
+                let dx = gesture.translation(in: gesture.view).x
+                let vx = gesture.velocity(in: gesture.view).x
+                // 从屏幕左缘(≤44pt)开始、且向右位移足够(或快速右甩) → 关闭
+                if startX >= 0, startX <= 44, (dx > 60 || vx > 500) {
+                    action()
+                }
+                startX = -1
+            default:
+                break
             }
         }
     }
@@ -65,7 +79,7 @@ struct EdgePanCloseDetector: UIViewRepresentable {
 struct EdgeSwipeDismissModifier: ViewModifier {
     let action: () -> Void
     /// 左缘手势区域宽度（pt），只占屏幕最左缘，不挡中间内容的滑动/点击
-    private let edgeWidth: CGFloat = 44
+    private let edgeWidth: CGFloat = 48
 
     func body(content: Content) -> some View {
         content

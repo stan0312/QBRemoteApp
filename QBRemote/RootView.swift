@@ -69,25 +69,33 @@ struct RootView: View {
 
         qb.updateBaseURL(settings.activeQBURL)
         fb.updateBaseURL(settings.activeFBURL)
+        AppLog("Root", "开始连接 —— 使用局域网开关=\(settings.useLAN)")
+        AppLog("Root", "qB 地址=\(settings.activeQBURL)")
+        AppLog("Root", "FileBrowser 地址=\(settings.activeFBURL)")
 
         Task {
             do {
                 // 登录 qB
                 let qbOK = try await qb.login(username: settings.qbUsername, password: settings.qbPassword)
                 if !qbOK {
+                    AppLog("Root", "qB 登录失败")
                     connectError = "qBittorrent 登录失败，请检查账号密码"
                     isConnecting = false
                     return
                 }
+                AppLog("Root", "qB 登录成功")
                 // 登录 FileBrowser
                 let fbToken = try await fb.login(username: settings.fbUsername, password: settings.fbPassword)
                 if fbToken == nil {
+                    AppLog("Root", "FileBrowser 登录失败")
                     connectError = "FileBrowser 登录失败，请检查账号密码"
                     isConnecting = false
                     return
                 }
+                AppLog("Root", "FileBrowser 登录成功")
                 isConnecting = false
             } catch {
+                AppLog("Root", "连接异常: \(error.localizedDescription)")
                 connectError = error.localizedDescription
                 isConnecting = false
             }

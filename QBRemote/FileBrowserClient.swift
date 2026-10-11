@@ -25,7 +25,9 @@ class FileBrowserClient: ObservableObject {
 
     /// 登录 FileBrowser（POST /api/login，返回 JWT token 字符串）
     func login(username: String, password: String) async throws -> String? {
+        AppLog("FB", "尝试登录 FileBrowser: \(baseURL) 用户=\(username)")
         guard let url = URL(string: baseURL + "/api/login") else {
+            AppLog("FB", "登录失败: baseURL 非法 \(baseURL)")
             throw FBError.invalidURL
         }
         var req = URLRequest(url: url)
@@ -40,17 +42,24 @@ class FileBrowserClient: ObservableObject {
 
         let (data, resp) = try await session.data(for: req)
         if let http = resp as? HTTPURLResponse {
+            AppLog("FB", "登录响应 HTTP=\(http.statusCode)")
             if http.statusCode == 403 {
                 // 登录接口被反代/WAF 拦截的情况
+                AppLog("FB", "登录被拒(403) —— 可能是反代/WAF 拦截 /api/login")
                 throw FBError.loginBlocked
             }
             if http.statusCode >= 400 {
+                AppLog("FB", "登录失败 HTTP=\(http.statusCode)")
                 throw FBError.serverError(http.statusCode)
             }
         }
         let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !token.isEmpty else { throw FBError.invalidToken }
+        guard !token.isEmpty else {
+            AppLog("FB", "登录失败: 返回空 token")
+            throw FBError.invalidToken
+        }
         self.token = token
+        AppLog("FB", "登录成功 token 长度=\(token.count)")
         return token
     }
 

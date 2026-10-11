@@ -134,7 +134,6 @@ struct MediaItemView: View {
         }
         .onAppear { start() }
         .onDisappear { stop() }
-        .edgeSwipeDismiss { dismiss() }
         .fullScreenCover(isPresented: $showFullScreen) {
             ZStack(alignment: .topTrailing) {
                 if isNativePlayable, let p = avPlayer {

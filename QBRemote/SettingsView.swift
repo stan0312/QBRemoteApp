@@ -88,13 +88,11 @@ struct SettingsView: View {
                     }
                 }
             }
-        }
-        .edgeSwipeDismiss { dismiss() }
+            .edgeSwipeDismiss { dismiss() }
     }
 }
 
-extension Bundle {
-    /// 版本号，形如 1.25.10.12 (173042)，用于确认装的是否最新构建
+extension Bundle {    /// 版本号，形如 1.25.10.12 (173042)，用于确认装的是否最新构建
     var appVersion: String {
         let v = infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let b = infoDictionary?["CFBundleVersion"] as? String ?? "?"

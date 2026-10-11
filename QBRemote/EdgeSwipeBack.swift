@@ -84,8 +84,14 @@ struct EdgeSwipeDismissModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .overlay(alignment: .leading) {
-                EdgePanCloseDetector(action: action)
-                    .frame(width: edgeWidth)
+                // 用 GeometryReader 撑满左缘高度，避免仅 frame(width:) 时 UIViewRepresentable
+                // 固有高度为 0、整条手势区不可命中的问题
+                GeometryReader { geo in
+                    EdgePanCloseDetector(action: action)
+                        .frame(width: edgeWidth, height: geo.size.height)
+                }
+                .frame(width: edgeWidth)
+                .allowsHitTesting(true)
             }
     }
 }

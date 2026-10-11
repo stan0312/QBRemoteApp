@@ -21,6 +21,8 @@ struct MediaPreviewView: View {
     @State private var localFileURL: URL?
     @State private var downloading = false
     @State private var downloadError: String?
+    /// 预览页右上角「设置」入口（含连接设置、调试日志等）
+    @State private var showSettings = false
 
     private var currentFile: TorrentFile { files[min(currentIndex, files.count - 1)] }
 
@@ -48,14 +50,28 @@ struct MediaPreviewView: View {
             dismiss()
         }
         .overlay(alignment: .topTrailing) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 32))
-                    .foregroundColor(.white.opacity(0.85))
-                    .padding(12)
+            HStack(spacing: 0) {
+                // 设置入口：连接设置 + 调试日志（不退出预览即可查看/修改）
+                Button {
+                    showSettings = true
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 22))
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(14)
+                }
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(12)
+                }
             }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(settings: settings)
         }
         .overlay(alignment: .top) {
             if files.count > 1 {

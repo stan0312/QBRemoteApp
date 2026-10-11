@@ -15,6 +15,12 @@ jobs:
       - name: 安装 XcodeGen
         run: brew install xcodegen
 
+      - name: 计算构建版本号（每次构建递增，确保 TrollStore 覆盖安装生效）
+        id: ver
+        run: |
+          echo "MARKETING_VERSION=1.$(date -u +%y.%m.%d)" >> "$GITHUB_OUTPUT"
+          echo "CURRENT_PROJECT_VERSION=$(date -u +%H%M%S)" >> "$GITHUB_OUTPUT"
+
       - name: 生成 Xcode 工程
         run: xcodegen generate
 
@@ -27,6 +33,8 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="${{ steps.ver.outputs.MARKETING_VERSION }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.ver.outputs.CURRENT_PROJECT_VERSION }}" \
             build
 
       - name: 打包 IPA

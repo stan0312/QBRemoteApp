@@ -56,6 +56,15 @@ struct SettingsView: View {
                     }
                 }
 
+                Section(header: Text("关于")) {
+                    HStack {
+                        Text("版本")
+                        Spacer()
+                        Text(Bundle.main.appVersion)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 Section {
                     Button(action: {
                         settings.save()
@@ -76,5 +85,14 @@ struct SettingsView: View {
             }
         }
         .edgeSwipeDismiss { dismiss() }
+    }
+}
+
+extension Bundle {
+    /// 版本号，形如 1.25.10.12 (173042)，用于确认装的是否最新构建
+    var appVersion: String {
+        let v = infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (\(b))"
     }
 }

@@ -82,8 +82,8 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .toolbar {
-                if showsCancel {
-                    ToolbarItem(placement: .cancellationAction) {
+                ToolbarItem(placement: .cancellationAction) {
+                    if showsCancel {
                         Button("取消") { dismiss() }
                     }
                 }

@@ -1,14 +1,17 @@
 import SwiftUI
 
 /// 设置页面：qB 和 FileBrowser 的连接信息
+/// 注意：本视图不包含 NavigationView，由调用方（RootView / PreviewSettingsSheet）决定容器，
+/// 避免被 NavigationLink push 时出现双层导航栏错乱。
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     var onSave: (() -> Void)?
+    /// 是否作为顶层页面显示「取消」按钮（RootView 的 sheet 场景传 true）
+    var showsCancel: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationView {
-            Form {
+        Form {
                 Section(header: Text("qBittorrent 下载器")) {
                     TextField("地址", text: $settings.qbURL)
                         .keyboardType(.URL)
@@ -79,8 +82,10 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                if showsCancel {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { dismiss() }
+                    }
                 }
             }
         }

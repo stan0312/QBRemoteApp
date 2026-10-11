@@ -17,8 +17,10 @@ struct RootView: View {
         Group {
             if !settings.isConfigured {
                 // 首次使用：引导设置
-                SettingsView(settings: settings) {
-                    connect()
+                NavigationView {
+                    SettingsView(settings: settings, showsCancel: false) {
+                        connect()
+                    }
                 }
             } else if isConnected {
                 TorrentListView(qb: qb, fb: fb, settings: settings)
@@ -27,8 +29,10 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView(settings: settings) {
-                connect()
+            NavigationView {
+                SettingsView(settings: settings, showsCancel: true) {
+                    connect()
+                }
             }
         }
     }

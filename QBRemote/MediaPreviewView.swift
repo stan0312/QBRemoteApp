@@ -696,6 +696,9 @@ struct MediaItemView: View {
         let writeQueue = DispatchQueue(label: "qb.stream.write")
         let lock = NSLock()
         var completed = 0
+        // 严格校验每段：必须 206 且 Content-Range 覆盖请求区间、字节数等于区间长度；
+        // 否则说明远程链路忽略/不支持 Range（返回 200 整文件），整段拼接会损坏文件 → 立即降级单连接整下
+        var segFailed = 0
         for idx in order {
             let s = Int64(idx) * segSize
             let e = min(s + segSize - 1, total - 1)
@@ -704,8 +707,11 @@ struct MediaItemView: View {
             var req = URLRequest(url: url)
             req.setValue(token, forHTTPHeaderField: "X-Auth")
             req.setValue("bytes=\(s)-\(e)", forHTTPHeaderField: "Range")
-            let task = URLSession.shared.dataTask(with: req) { data, _, _ in
-                if let data = data, !data.isEmpty {
+            let task = URLSession.shared.dataTask(with: req) { data, resp, _ in
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                let dataLen = Int64(data?.count ?? 0)
+                let expected = e - s + 1
+                if code == 206 && dataLen == expected, let data = data {
                     writeQueue.async {
                         if let fh = try? FileHandle(forWritingTo: fileURL) {
                             try? fh.seek(toOffset: UInt64(s))
@@ -720,7 +726,9 @@ struct MediaItemView: View {
                         group.leave()
                     }
                 } else {
-                    lock.lock(); completed += 1; lock.unlock()
+                    // 段异常：不写入（避免把整文件×8 拼坏），计入失败
+                    Log("Preview", "分段[\(s)-\(e)] 异常 HTTP=\(code) 数据长=\(dataLen) 期望=\(expected) → 计入失败")
+                    lock.lock(); completed += 1; segFailed += 1; lock.unlock()
                     DispatchQueue.main.async {
                         self.downloadProgress = min(1, Double(completed) / Double(parts))
                     }
@@ -731,12 +739,19 @@ struct MediaItemView: View {
             task.resume()
         }
         group.notify(queue: .main) {
+            if segFailed > 0 {
+                Log("Preview", "\(segFailed) 段请求异常 → 降级单连接整下（远程链路可能不支持 Range）")
+                self.cancelDownload()
+                self.downloadStreamSingle(url: url, token: token)
+                return
+            }
             self.isDownloading = false
             written.set(total)
         }
         // 诊断：6 秒内 0 进度 → 判定连不上 FileBrowser，给出明确错误而非永远卡 0%
+        // 单连接兜底有自己的 20 秒诊断，这里跳过避免误报
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-            if self.isDownloading && self.downloadProgress <= 0 && self.streamError == nil {
+            if self.isDownloading && self.downloadProgress <= 0 && self.streamError == nil && !self.singleFallback {
                 Log("Preview", "6 秒内 0 进度 → 触发超时诊断，取消下载")
                 self.cancelDownload()
                 self.streamError = "无法连接 FileBrowser 下载数据（6 秒内 0 进度）。\n请检查设置里的 FileBrowser 地址，或局域网开关填写的内网 IP 是否正确。"

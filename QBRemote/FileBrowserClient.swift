@@ -9,7 +9,8 @@ class FileBrowserClient: ObservableObject {
 
     private let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 20
+        // 远程 DDNS 链路首包延迟较高，20s 太紧会误判超时；放宽到 45s
+        config.timeoutIntervalForRequest = 45
         return URLSession(configuration: config)
     }()
 

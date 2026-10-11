@@ -43,6 +43,10 @@ struct MediaPreviewView: View {
             .tabViewStyle(.page(indexDisplayMode: .never))
             .background(Color.black.ignoresSafeArea())
         }
+        // 全屏预览也支持「左缘右滑」退出（与点右上角 xmark 等效）
+        .edgeSwipeDismiss {
+            dismiss()
+        }
         .overlay(alignment: .topTrailing) {
             Button {
                 dismiss()
@@ -97,6 +101,8 @@ struct MediaItemView: View {
     @State private var htmlError = false
     @State private var htmlBusy = false
     @State private var downloadProgress: Double = 0
+    /// 单连接整下兜底模式（远程链路不支持 Range 时），用于进度文案区分
+    @State private var singleFallback = false
     @State private var isDownloading = false
     @State private var activeTasks: [URLSessionDataTask] = []
     /// 边下边播的本地临时文件（onDisappear 时删除）
@@ -180,7 +186,7 @@ struct MediaItemView: View {
             Text("正在准备播放…")
                 .font(.subheadline)
                 .foregroundColor(.white)
-            Text("多连接并发 · 已缓冲 \(Int(downloadProgress * 100))%")
+            Text(singleFallback ? "单连接下载中 · 不支持分段加速" : "多连接并发 · 已缓冲 \(Int(downloadProgress * 100))%")
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.6))
             Button {
@@ -527,21 +533,29 @@ struct MediaItemView: View {
         guard let token = fb.token else { streamError = "FileBrowser 未登录，请返回重连"; return }
         isDownloading = true
         downloadProgress = 0
+        singleFallback = false
         var probe = URLRequest(url: url)
         probe.setValue(token, forHTTPHeaderField: "X-Auth")
         probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-        URLSession.shared.dataTask(with: probe) { _, resp, _ in
-            var total: Int64 = -1
-            if let http = resp as? HTTPURLResponse, http.statusCode == 206,
-               let cr = http.value(forHTTPHeaderField: "Content-Range"),
-               let last = cr.split(separator: "/").last, let t = Int64(last) {
-                total = t
-            }
+        URLSession.shared.dataTask(with: probe) { _, resp, err in
             DispatchQueue.main.async {
-                if total <= 0 {
+                guard let http = resp as? HTTPURLResponse else {
+                    // 请求级失败：地址不可达 / 端口未开放 / 网络错误
+                    self.isDownloading = false
+                    self.streamError = "无法连接 FileBrowser（\(err?.localizedDescription ?? "网络错误")）。\n请确认 FileBrowser 的 8033 端口已在路由器对外开放，或检查设置里的地址。"
+                    return
+                }
+                if http.statusCode == 206,
+                   let cr = http.value(forHTTPHeaderField: "Content-Range"),
+                   let last = cr.split(separator: "/").last, let t = Int64(last), t > 0 {
+                    // 正常支持 Range → 8 段并发边下边播
+                    self.startStreaming(url: url, token: token, total: t)
+                } else if http.statusCode == 200 {
+                    // 服务器忽略了 Range 请求、整返文件 → 单连接整下兜底
                     self.downloadStreamSingle(url: url, token: token)
                 } else {
-                    self.startStreaming(url: url, token: token, total: total)
+                    self.isDownloading = false
+                    self.streamError = "FileBrowser 返回错误（HTTP \(http.statusCode)）。\n请检查文件是否存在、账号是否有权限，或端口是否正确。"
                 }
             }
         }.resume()
@@ -636,10 +650,14 @@ struct MediaItemView: View {
     }
 
     private func downloadStreamSingle(url: URL, token: String) {
-        // 不支持 Range 时：单连接整下到临时文件再播（少见）
+        // 远程链路不支持 Range（探针返回 200 整返）时的兜底：单连接整下到临时文件再播。
+        // 增加超时诊断：20 秒未完成且无错误时给出明确提示，避免一直转圈。
+        singleFallback = true
+        isDownloading = true
+        downloadProgress = 0
         var req = URLRequest(url: url)
         req.setValue(token, forHTTPHeaderField: "X-Auth")
-        let task = URLSession.shared.dataTask(with: req) { data, _, _ in
+        let task = URLSession.shared.dataTask(with: req) { data, _, err in
             DispatchQueue.main.async {
                 if let data = data, !data.isEmpty {
                     let ext = self.file.fileExtension.isEmpty ? "mp4" : self.file.fileExtension
@@ -650,12 +668,20 @@ struct MediaItemView: View {
                     self.isDownloading = false
                     self.playLocal(fileURL: dest)
                 } else {
-                    self.streamError = "文件下载失败，请检查网络连接与 FileBrowser 地址"
+                    self.isDownloading = false
+                    self.streamError = "文件下载失败：\(err?.localizedDescription ?? "请检查 FileBrowser 地址与端口")"
                 }
             }
         }
         activeTasks.append(task)
         task.resume()
+        // 诊断：20 秒未完成且无错误 → 远程链路慢/异常，给出可操作提示
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+            if self.isDownloading && self.streamError == nil {
+                self.cancelDownload()
+                self.streamError = "远程下载超时（20 秒）。\n该视频的下载地址不支持分段加速，请检查 FileBrowser 的 8033 端口是否已对外开放，或改用局域网地址。"
+            }
+        }
     }
 
     private func playLocal(fileURL: URL) {
@@ -782,6 +808,9 @@ struct MediaItemView: View {
     }
 
     /// 多连接并发下载图片并解码（分 4 段，按序合并，绕单连接限速）
+    /// 远程链路（DDNS 反代/运营商网关）可能不支持或忽略 Range：每段必须严格校验
+    /// 返回 206 且 Content-Range 与请求区间一致，否则整段回退单连接下载，
+    /// 避免把「整文件 × 4」拼坏导致解码失败。
     private func downloadImageSegments(url: URL, token: String, total: Int64) {
         let parts = 4
         let segSize = (total + Int64(parts) - 1) / Int64(parts)
@@ -797,13 +826,25 @@ struct MediaItemView: View {
             var req = URLRequest(url: url)
             req.setValue(token, forHTTPHeaderField: "X-Auth")
             req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
-            URLSession.shared.dataTask(with: req) { data, _, _ in
+            URLSession.shared.dataTask(with: req) { data, resp, _ in
                 defer { group.leave() }
-                if let data = data {
-                    lock.lock(); datas[i] = data; lock.unlock()
-                } else {
-                    failed = true
+                // 校验：必须是 206，且 Content-Range 覆盖请求区间，且数据长度 == 区间长度
+                if let http = resp as? HTTPURLResponse, http.statusCode == 206,
+                   let data = data,
+                   let cr = http.value(forHTTPHeaderField: "Content-Range") {
+                    // Content-Range 形如 "bytes start-end/total"，解析 start-end 段
+                    let rangePart = cr.split(separator: " ").last ?? ""
+                    let bounds = rangePart.split(separator: "/").first ?? ""
+                    let se = bounds.split(separator: "-")
+                    if se.count == 2,
+                       let s = Int64(se[0]), let e = Int64(se[1]),
+                       s == start, e == end, data.count == Int(e - s + 1) {
+                        lock.lock(); datas[i] = data; lock.unlock()
+                        return
+                    }
                 }
+                // 任何一段不是标准的 206 区间响应 → 放弃分段，回退单连接
+                failed = true
             }.resume()
         }
         group.notify(queue: .main) {

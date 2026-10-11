@@ -45,9 +45,27 @@ struct MediaPreviewView: View {
             .tabViewStyle(.page(indexDisplayMode: .never))
             .background(Color.black.ignoresSafeArea())
         }
+        .onAppear {
+            Log("Preview", "进入预览页 共 \(files.count) 个文件 当前=\(currentIndex + 1)")
+        }
         // 全屏预览也支持「左缘右滑」退出（与点右上角 xmark 等效）
         .edgeSwipeDismiss {
             dismiss()
+        }
+        .overlay(alignment: .topLeading) {
+            // 明确的「返回」按钮兜底：手势万一失效也能一键退出预览
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(14)
+                    .background(Circle().fill(Color.black.opacity(0.4)))
+                    .padding(.leading, 4)
+                    .padding(.top, 4)
+            }
+            .accessibilityLabel("返回")
         }
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 0) {

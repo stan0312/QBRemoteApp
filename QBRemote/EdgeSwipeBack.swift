@@ -63,8 +63,8 @@ struct EdgePanCloseDetector: UIViewRepresentable {
             case .ended, .cancelled:
                 let dx = gesture.translation(in: gesture.view).x
                 let vx = gesture.velocity(in: gesture.view).x
-                // 从屏幕左缘(≤44pt)开始、且向右位移足够(或快速右甩) → 关闭
-                if startX >= 0, startX <= 44, (dx > 60 || vx > 500) {
+                // 从屏幕左缘(≤90pt，放宽适配拇指落点)开始、且向右位移足够(或快速右甩) → 关闭
+                if startX >= 0, startX <= 90, (dx > 60 || vx > 400) {
                     action()
                 }
                 startX = -1
@@ -79,7 +79,7 @@ struct EdgePanCloseDetector: UIViewRepresentable {
 struct EdgeSwipeDismissModifier: ViewModifier {
     let action: () -> Void
     /// 左缘手势区域宽度（pt），只占屏幕最左缘，不挡中间内容的滑动/点击
-    private let edgeWidth: CGFloat = 48
+    private let edgeWidth: CGFloat = 56
 
     func body(content: Content) -> some View {
         content

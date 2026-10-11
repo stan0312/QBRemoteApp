@@ -5,6 +5,13 @@ import ImageIO
 import MobileVLCKit
 import WebKit
 
+/// 预览页全局播放控制命令（由右上角设置下发）
+enum PreviewControl: Equatable {
+    case none
+    case pauseAll
+    case playAll
+}
+
 /// 媒体预览：同级目录左右滑动切换，逐个预览
 /// - mp4/mov/m4v 等原生格式：AVPlayer 直接播放（带 X-Auth）
 /// - mkv 等 iOS 原生不支持的格式：内置 VLC（经本地代理带认证）播放
@@ -21,8 +28,12 @@ struct MediaPreviewView: View {
     @State private var localFileURL: URL?
     @State private var downloading = false
     @State private var downloadError: String?
-    /// 预览页右上角「设置」入口（含连接设置、调试日志等）
+    /// 预览页右上角「设置」入口（含播放控制、速度、调试日志、连接设置）
     @State private var showSettings = false
+    /// 全局播放控制命令（暂停全部/开始全部）
+    @State private var controlCmd: PreviewControl = .none
+    /// 全局播放速度
+    @State private var playbackRate: Float = 1.0
 
     private var currentFile: TorrentFile { files[min(currentIndex, files.count - 1)] }
 
@@ -38,7 +49,9 @@ struct MediaPreviewView: View {
                                   showShare: $showShare,
                                   localFileURL: $localFileURL,
                                   downloading: $downloading,
-                                  downloadError: $downloadError)
+                                  downloadError: $downloadError,
+                                  controlCmd: controlCmd,
+                                  playbackRate: playbackRate)
                         .tag(i)
                 }
             }
@@ -89,7 +102,9 @@ struct MediaPreviewView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView(settings: settings)
+            PreviewSettingsSheet(settings: settings,
+                                 controlCmd: $controlCmd,
+                                 playbackRate: $playbackRate)
         }
         .overlay(alignment: .top) {
             if files.count > 1 {
@@ -121,6 +136,10 @@ struct MediaItemView: View {
     @Binding var localFileURL: URL?
     @Binding var downloading: Bool
     @Binding var downloadError: String?
+    /// 来自预览页设置下发的全局播放控制命令
+    let controlCmd: PreviewControl
+    /// 来自预览页设置的全局播放速度
+    let playbackRate: Float
 
     @State private var avPlayer: AVPlayer?
     @State private var audioPlayer: AVPlayer?
@@ -168,6 +187,27 @@ struct MediaItemView: View {
         }
         .onAppear { start() }
         .onDisappear { stop() }
+        // 右上角设置下发的全局播放控制
+        .onChange(of: controlCmd) { cmd in
+            switch cmd {
+            case .pauseAll:
+                avPlayer?.pause()
+                audioPlayer?.pause()
+                vlcPlayer?.pause()
+            case .playAll:
+                avPlayer?.play()
+                audioPlayer?.play()
+                vlcPlayer?.play()
+            case .none:
+                break
+            }
+        }
+        // 右上角设置下发的全局播放速度
+        .onChange(of: playbackRate) { r in
+            avPlayer?.rate = r
+            audioPlayer?.rate = r
+            vlcPlayer?.rate = r
+        }
         .fullScreenCover(isPresented: $showFullScreen) {
             ZStack(alignment: .topTrailing) {
                 if isNativePlayable, let p = avPlayer {
@@ -575,31 +615,56 @@ struct MediaItemView: View {
         isDownloading = true
         downloadProgress = 0
         singleFallback = false
-        Log("Preview", "视频探针开始: \(url.absoluteString)")
+        // 依次尝试候选 URL（自动映射失败(404)时用相对名直连兜底）
+        probeStreaming(candidates: probeCandidates, index: 0, token: token)
+    }
+
+    /// 视频探针候选列表：①自动/手动映射 URL；②相对名直连（不套 save_path 顶层目录）
+    private var probeCandidates: [URL] {
+        var list: [URL] = []
+        if let u = rawURL { list.append(u) }
+        if let u = fb.rawURLDirect(relativeName: file.name), !list.contains(u) { list.append(u) }
+        return list
+    }
+
+    /// 逐个候选探针：206 → 8 段并发；200 → 单连接整下；404/401/无响应 → 试下一个候选
+    private func probeStreaming(candidates: [URL], index: Int, token: String) {
+        guard index < candidates.count else {
+            Log("Preview", "全部候选 URL 探针均失败（共 \(candidates.count) 个） → 报错")
+            self.isDownloading = false
+            self.streamError = "无法连接 FileBrowser 或文件路径不匹配。\n已尝试 \(candidates.count) 个地址均失败，请检查设置里的连接地址与路径映射，或查看调试日志。"
+            return
+        }
+        let url = candidates[index]
+        Log("Preview", "视频探针[候选\(index + 1)/\(candidates.count)]: \(url.absoluteString)")
         var probe = URLRequest(url: url)
+        probe.timeoutInterval = 10
         probe.setValue(token, forHTTPHeaderField: "X-Auth")
         probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         URLSession.shared.dataTask(with: probe) { _, resp, err in
             DispatchQueue.main.async {
                 guard let http = resp as? HTTPURLResponse else {
                     // 请求级失败：地址不可达 / 端口未开放 / 网络错误
-                    Log("Preview", "探针失败(无 HTTP 响应) err=\(err?.localizedDescription ?? "未知") —— 判定 FileBrowser 8033 端口不通或地址错误")
-                    self.isDownloading = false
-                    self.streamError = "无法连接 FileBrowser（\(err?.localizedDescription ?? "网络错误")）。\n请确认 FileBrowser 的 8033 端口已在路由器对外开放，或检查设置里的地址。"
+                    Log("Preview", "候选\(index + 1) 探针无 HTTP 响应 err=\(err?.localizedDescription ?? "未知") → 试下一候选")
+                    self.probeStreaming(candidates: candidates, index: index + 1, token: token)
                     return
                 }
                 if http.statusCode == 206,
                    let cr = http.value(forHTTPHeaderField: "Content-Range"),
                    let last = cr.split(separator: "/").last, let t = Int64(last), t > 0 {
                     // 正常支持 Range → 8 段并发边下边播
-                    Log("Preview", "探针 206 支持 Range, Content-Range=\(cr) total=\(t) → 8 段并发")
+                    Log("Preview", "候选\(index + 1) 探针 206 支持 Range, Content-Range=\(cr) total=\(t) → 8 段并发")
                     self.startStreaming(url: url, token: token, total: t)
                 } else if http.statusCode == 200 {
                     // 服务器忽略了 Range 请求、整返文件 → 单连接整下兜底
-                    Log("Preview", "探针返回 200(忽略 Range) → 单连接整下兜底")
+                    Log("Preview", "候选\(index + 1) 探针返回 200(忽略 Range) → 单连接整下兜底")
                     self.downloadStreamSingle(url: url, token: token)
+                } else if http.statusCode == 401 || http.statusCode == 404 {
+                    // 路径映射或权限问题 → 换下一个候选 URL 再试
+                    Log("Preview", "候选\(index + 1) 探针返回 HTTP \(http.statusCode) → 试下一候选")
+                    self.probeStreaming(candidates: candidates, index: index + 1, token: token)
                 } else {
-                    Log("Preview", "探针返回 HTTP \(http.statusCode) → 报错")
+                    Log("Preview", "候选\(index + 1) 探针返回 HTTP \(http.statusCode) → 报错")
                     self.isDownloading = false
                     self.streamError = "FileBrowser 返回错误（HTTP \(http.statusCode)）。\n请检查文件是否存在、账号是否有权限，或端口是否正确。"
                 }
@@ -839,9 +904,21 @@ struct MediaItemView: View {
 
     private func loadImage(url: URL) {
         guard let token = fb.token else { imageError = true; return }
-        Log("Preview", "图片探测开始: \(url.absoluteString)")
-        // 先探测文件总大小（Range 请求拿 Content-Range），支持则走多连接并发下载（绕单连接限速）
+        // 依次尝试候选 URL（自动映射失败(404)时用相对名直连兜底）
+        probeImage(candidates: probeCandidates, index: 0, token: token)
+    }
+
+    /// 逐个候选图片探测：206 且有 Content-Range → 分段并发；否则单连接整下
+    private func probeImage(candidates: [URL], index: Int, token: String) {
+        guard index < candidates.count else {
+            Log("Preview", "图片全部候选 URL 探测失败（共 \(candidates.count) 个） → 报错")
+            imageError = true
+            return
+        }
+        let url = candidates[index]
+        Log("Preview", "图片探测[候选\(index + 1)/\(candidates.count)]: \(url.absoluteString)")
         var probe = URLRequest(url: url)
+        probe.timeoutInterval = 10
         probe.setValue(token, forHTTPHeaderField: "X-Auth")
         probe.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         URLSession.shared.dataTask(with: probe) { _, resp, err in
@@ -859,9 +936,12 @@ struct MediaItemView: View {
                 }
             }
             DispatchQueue.main.async {
-                Log("Preview", "图片探针结果 HTTP=\(code) Content-Range=\(range) total=\(total) err=\(err?.localizedDescription ?? "无")")
-                if total <= 0 {
-                    Log("Preview", "图片不支持 Range(或请求失败) → 单连接整下")
+                Log("Preview", "图片探针[候选\(index + 1)] 结果 HTTP=\(code) Content-Range=\(range) total=\(total) err=\(err?.localizedDescription ?? "无")")
+                if total <= 0 && (code == 401 || code == 404 || code == 0) {
+                    Log("Preview", "图片候选\(index + 1) 失败(HTTP \(code)) → 试下一候选")
+                    self.probeImage(candidates: candidates, index: index + 1, token: token)
+                } else if total <= 0 {
+                    Log("Preview", "图片候选\(index + 1) 不支持 Range(或请求失败) → 单连接整下")
                     self.loadImageSingle(url: url)
                 } else {
                     self.downloadImageSegments(url: url, token: token, total: total)

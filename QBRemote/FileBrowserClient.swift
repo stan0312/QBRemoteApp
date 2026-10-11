@@ -96,6 +96,17 @@ class FileBrowserClient: ObservableObject {
         return URL(string: baseURL + "/api/raw" + encoded)
     }
 
+    /// 备选 raw URL：相对名直接作为 FileBrowser 路径（不套 save_path 最后一段）。
+    /// 当自动映射的顶层目录与实际目录结构不符（探针 404）时，用此兜底。
+    func rawURLDirect(relativeName: String) -> URL? {
+        var rel = relativeName
+        if !rel.hasPrefix("/") { rel = "/" + rel }
+        guard let encoded = rel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else {
+            return nil
+        }
+        return URL(string: baseURL + "/api/raw" + encoded)
+    }
+
     /// 构造 WebDAV URL（Basic 认证内嵌，供 VLC 等第三方播放器使用）
     func davURL(savePath: String, relativeName: String, prefix: String,
                 username: String, password: String) -> URL? {
